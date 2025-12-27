@@ -344,9 +344,9 @@ Apache License 2.0 - See [LICENSE](LICENSE) for details.
 
 ## 🔗 Links
 
-- **Repository:** [https://github.com/humifortis/keycloak-connector](https://github.com/humifortis/keycloak-connector)
+- **Repository:** [https://github.com/humifortis-keycloak-connector](https://github.com/humifortis-keycloak-connector)
 - **SaaS Console:** [https://humifortis.educosmic.tech](https://humifortis.educosmic.tech)
-- **Documentation:** [https://docs.humifortis.tech/connectors/keycloak](https://docs.humifortis.tech/connectors/keycloak)
+- **Documentation:** [https://humifortis.educosmic.tech](https://humifortis.educosmic.tech)
 - **Support:** humifortis@tsognong.me
 
 ## 🤝 Contributing
@@ -357,4 +357,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 For issues, questions, or feature requests:
 - Email: humifortis@tsognong.me
-- GitHub Issues: [https://github.com/humifortis/keycloak-connector/issues](https://github.com/humifortis/keycloak-connector/issues)
+- GitHub Issues: [https://github.com/humifortis-keycloak-connector/issues](https://github.com/humifortis-keycloak-connector/issues)
