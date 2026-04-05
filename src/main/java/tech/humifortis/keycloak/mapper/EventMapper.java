@@ -92,25 +92,25 @@ public class EventMapper {
         return switch (eventType) {
             case LOGIN -> "auth_login_success";
             case LOGIN_ERROR -> "auth_login_failed";
-            case LOGOUT -> "auth_logout";
+            case LOGOUT -> "session_clean_logout";
             case REGISTER -> "auth_register";
-            case UPDATE_PASSWORD -> "auth_password_update";
-            case UPDATE_EMAIL -> "auth_email_update";
+            case UPDATE_PASSWORD -> "update_credential";
+            case UPDATE_EMAIL -> "update_email";
             case VERIFY_EMAIL -> "auth_email_verify";
-            case RESET_PASSWORD -> "auth_password_reset";
-            case RESET_PASSWORD_ERROR -> "auth_password_reset_failed";
+            case RESET_PASSWORD -> "reset_password";
+            case RESET_PASSWORD_ERROR -> "reset_password_error";
             case CODE_TO_TOKEN -> "auth_token_exchange";
             case CODE_TO_TOKEN_ERROR -> "auth_token_exchange_failed";
             case REFRESH_TOKEN -> "auth_token_refresh";
             case REFRESH_TOKEN_ERROR -> "auth_token_refresh_failed";
             case INTROSPECT_TOKEN -> "auth_token_introspect";
             case INTROSPECT_TOKEN_ERROR -> "auth_token_introspect_failed";
-            case REVOKE_GRANT -> "auth_grant_revoked";
-            case UPDATE_TOTP -> "auth_totp_update";
-            case REMOVE_TOTP -> "auth_totp_remove";
+            case REVOKE_GRANT -> "revoke_grant";
+            case UPDATE_TOTP -> "mfa_token_enrolled";
+            case REMOVE_TOTP -> "remove_credential";
             case SEND_VERIFY_EMAIL -> "auth_verify_email_sent";
             case SEND_RESET_PASSWORD -> "auth_reset_password_sent";
-            case DELETE_ACCOUNT -> "auth_account_deleted";
+            case DELETE_ACCOUNT -> "delete_account";
             default -> "auth_" + eventType.name().toLowerCase();
         };
     }
