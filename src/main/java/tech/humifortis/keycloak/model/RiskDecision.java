@@ -1,10 +1,20 @@
+
 package tech.humifortis.keycloak.model;
 
-import com.google.gson.annotations.SerializedName;
-import java.util.List;
 import java.util.Map;
 
+import com.google.gson.annotations.SerializedName;
+
 public class RiskDecision {
+        public String getRiskLevel() {
+            if (metadata != null && metadata.containsKey("risk_level")) {
+                Object riskLevel = metadata.get("risk_level");
+                if (riskLevel != null) {
+                    return riskLevel.toString();
+                }
+            }
+            return null;
+        }
     public enum Action {
         ALLOW, CHALLENGE_MFA, BLOCK
     }

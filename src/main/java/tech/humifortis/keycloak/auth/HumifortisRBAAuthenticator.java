@@ -51,6 +51,19 @@ public class HumifortisRBAAuthenticator implements Authenticator {
             decision = saasClient.getRiskDecision(entityId);
             logger.debugf("RBA decision received for %s: %s (risk: %s)", 
                     entityId, decision.getAction(), decision.getRiskScore());
+            // Store risk decision in auth session notes and event details for feedback
+            context.getAuthenticationSession().setAuthNote("HUMIFORTIS_RISK_SCORE", decision.getRiskScore() != null ? decision.getRiskScore().toString() : "");
+            context.getAuthenticationSession().setAuthNote("HUMIFORTIS_RISK_LEVEL", decision.getRiskLevel() != null ? decision.getRiskLevel() : "");
+            context.getAuthenticationSession().setAuthNote("HUMIFORTIS_RISK_ACTION", decision.getAction() != null ? decision.getAction().name() : "");
+            context.getAuthenticationSession().setAuthNote("HUMIFORTIS_RISK_REASON", decision.getReason() != null ? decision.getReason() : "");
+
+            // Also store in event details for EventListener feedback
+            if (context.getEvent() != null) {
+                context.getEvent().detail("HUMIFORTIS_RISK_SCORE", decision.getRiskScore() != null ? decision.getRiskScore().toString() : "");
+                context.getEvent().detail("HUMIFORTIS_RISK_LEVEL", decision.getRiskLevel() != null ? decision.getRiskLevel() : "");
+                context.getEvent().detail("HUMIFORTIS_RISK_ACTION", decision.getAction() != null ? decision.getAction().name() : "");
+                context.getEvent().detail("HUMIFORTIS_RISK_REASON", decision.getReason() != null ? decision.getReason() : "");
+            }
         } catch (Exception e) {
             logger.errorf("Failed to get decision from SaaS for %s: %s", entityId, e.getMessage());
             handleFallback(context, "Service unavailable");
@@ -63,25 +76,28 @@ public class HumifortisRBAAuthenticator implements Authenticator {
                 logger.debugf("RBA: Allow login for %s", entityId);
                 context.success();
                 break;
-                
+
             case CHALLENGE_MFA:
                 logger.infof("RBA: Challenge MFA for %s (risk: %s)", 
                         entityId, decision.getRiskScore());
                 // This will force the next authenticator in the flow (typically OTP/WebAuthn)
                 context.attempted();
                 break;
-                
+
             case BLOCK:
                 logger.warnf("RBA: Block login for %s (risk: %s, reason: %s)", 
                         entityId, decision.getRiskScore(), decision.getReason());
-                
+
                 // Send block event back to SaaS
                 saasClient.sendBlockEventAsync(entityId, decision)
                         .exceptionally(ex -> {
                             logger.warn("Failed to send block event to SaaS", ex);
                             return null;
                         });
-                
+
+                // Set risk block marker for event listener feedback
+                context.getAuthenticationSession().setAuthNote("HUMIFORTIS_RISK_BLOCKED", "true");
+
                 // Deny access and show error page
                 context.failure(AuthenticationFlowError.ACCESS_DENIED);
                 context.forceChallenge(createBlockedPage(context, decision));
