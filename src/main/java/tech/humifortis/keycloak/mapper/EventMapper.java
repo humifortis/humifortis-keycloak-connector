@@ -103,11 +103,15 @@ public class EventMapper {
 
         String realmId = originEvent.getRealmId() != null
                 ? originEvent.getRealmId() : "unknown";
-        String userId  = originEvent.getUserId()  != null
-                ? originEvent.getUserId()  : detailOrFallback(
-                originEvent.getDetails(), "username", "anonymous");
-        String identifier =userId; //  detailOrFallback(
-                //originEvent.getDetails(), "username", userId);
+        // Try userId from event, else from details (set by adaptive auth logic)
+        String userId = originEvent.getUserId();
+        if (userId == null || userId.isBlank()) {
+            userId = detailOrFallback(originEvent.getDetails(), "userId", null);
+        }
+        if (userId == null || userId.isBlank()) {
+            userId = detailOrFallback(originEvent.getDetails(), "username", "anonymous");
+        }
+        String identifier = userId;
 
         humiEvent.setEntityId(
                 String.format("user:keycloak:%s:%s", realmId, identifier));

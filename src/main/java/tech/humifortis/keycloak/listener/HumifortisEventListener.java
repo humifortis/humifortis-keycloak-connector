@@ -13,9 +13,41 @@ import tech.humifortis.keycloak.client.SaasConfig;
 import tech.humifortis.keycloak.mapper.EventMapper;
 import tech.humifortis.keycloak.model.HumifortisEvent;
 
+/**
+ * Keycloak event listener that forwards security events to the Humifortis API.
+ *
+ * <h3>Feedback flow (risk-based authentication)</h3>
+ * <p>
+ * HumifortisRiskAuthenticator fires a {@link EventType#CUSTOM_REQUIRED_ACTION_ERROR}
+ * event with {@code error="humifortis_risk_decision"} immediately after
+ * evaluating risk. This listener catches that specific event type+error
+ * combination and emits the appropriate Humifortis feedback event.
+ *
+ * <p>This is more reliable than reading event.getDetails() on the terminal
+ * LOGIN/LOGIN_ERROR event because the flow-context EventBuilder is discarded
+ * by Keycloak before the terminal event is fired.
+ *
+ * <h3>Feedback event_type mapping</h3>
+ * <ul>
+ *   <li>CUSTOM_REQUIRED_ACTION_ERROR + "humifortis_risk_decision" + ACTION=ALLOW → auth_decision_allow</li>
+ *   <li>CUSTOM_REQUIRED_ACTION_ERROR + "humifortis_risk_decision" + BLOCKED=true  → auth_decision_block</li>
+ *   <li>CUSTOM_REQUIRED_ACTION_ERROR + "humifortis_risk_decision" + other action  → auth_decision_evaluated</li>
+ * </ul>
+ */
 public class HumifortisEventListener implements EventListenerProvider {
+
     private static final Logger logger =
             Logger.getLogger(HumifortisEventListener.class);
+
+    // Must match HumifortisRiskAuthenticator constants exactly.
+    private static final String DETAIL_RISK_ACTION  = "HUMIFORTIS_RISK_ACTION";
+    private static final String DETAIL_RISK_SCORE   = "HUMIFORTIS_RISK_SCORE";
+    private static final String DETAIL_RISK_LEVEL   = "HUMIFORTIS_RISK_LEVEL";
+    private static final String DETAIL_RISK_REASON  = "HUMIFORTIS_RISK_REASON";
+    private static final String DETAIL_RISK_BLOCKED = "HUMIFORTIS_RISK_BLOCKED";
+
+    // Sentinel that identifies our risk-decision event among all CUSTOM_REQUIRED_ACTION_ERROR events.
+    private static final String RISK_EVENT_ERROR = "humifortis_risk_decision";
 
     private static final Set<EventType> MONITORED_EVENTS = Set.of(
             EventType.LOGIN,
@@ -44,55 +76,90 @@ public class HumifortisEventListener implements EventListenerProvider {
             SaasConfig config = new SaasConfig();
             this.saasClient  = new SaasClient(config);
             this.eventMapper = new EventMapper();
-            logger.info("Humifortis Event Listener initialized");
+            logger.info("[HumifortisEventListener] Initialized");
         } catch (Exception e) {
-            logger.error("Failed to initialize Humifortis Event Listener", e);
-            throw new RuntimeException(
-                    "Failed to initialize Humifortis Event Listener", e);
+            logger.error("[HumifortisEventListener] Failed to initialize", e);
+            throw new RuntimeException("Failed to initialize Humifortis Event Listener", e);
         }
     }
 
     @Override
     public void onEvent(Event event) {
-        logger.debugf("Event: type=%s realm=%s user=%s",
-                event.getType(), event.getRealmId(), event.getUserId());
+        logger.debugf("[HumifortisEventListener] Received event: type=%s error=%s realm=%s user=%s",
+                event.getType(), event.getError(), event.getRealmId(), event.getUserId());
 
-        if (!MONITORED_EVENTS.contains(event.getType())) {
-            logger.debugf("Received unmonitored event: %s", event.getType());
-            //return;
+        // ── Path A: risk decision feedback event (fired by authenticator) ────
+        if (isRiskDecisionEvent(event)) {
+            emitFeedback(event);
+            // Do not forward this synthetic event as a standard security event.
+            return;
         }
 
-        // 1. Send the standard security event
-        try {
-            HumifortisEvent humiEvent = eventMapper.fromKeycloakEvent(event);
-            sendAsync(humiEvent, event.getType().name());
-        } catch (Exception e) {
-            logger.errorf("Error mapping/sending event %s: %s",
-                    event.getType(), e.getMessage());
-        }
-
-        // 2. Send feedback event if risk decision data is present
-        // Data is written into event details by the authenticator
-        // using context.getEvent().detail(key, value) before flow ends.
-        try {
-            String riskAction = detail(event, "HUMIFORTIS_RISK_ACTION");
-            if (riskAction == null) return; // no risk evaluation for this event
-
-            String riskScore  = detail(event, "HUMIFORTIS_RISK_SCORE");
-            String riskLevel  = detail(event, "HUMIFORTIS_RISK_LEVEL");
-            String riskReason = detail(event, "HUMIFORTIS_RISK_REASON");
-
-            String feedbackType;
-            if (event.getType() == EventType.LOGIN) {
-                feedbackType = "auth_decision_allow";
-            } else if (event.getType() == EventType.LOGIN_ERROR
-                    && "access_denied".equals(event.getError())
-                    && "true".equalsIgnoreCase(
-                            detail(event, "HUMIFORTIS_RISK_BLOCKED"))) {
-                feedbackType = "auth_decision_block";
-            } else {
-                feedbackType = "auth_decision_evaluated";
+        // ── Path B: standard security event ─────────────────────────────────
+        if (MONITORED_EVENTS.contains(event.getType())) {
+            try {
+                HumifortisEvent humiEvent = eventMapper.fromKeycloakEvent(event);
+                sendAsync(humiEvent, event.getType().name());
+            } catch (Exception e) {
+                logger.errorf("[HumifortisEventListener] Error mapping/sending event %s: %s",
+                        event.getType(), e.getMessage());
             }
+        } else {
+            logger.debugf("[HumifortisEventListener] Skipping unmonitored event: %s",
+                    event.getType());
+        }
+    }
+
+    @Override
+    public void onEvent(AdminEvent adminEvent, boolean includeRepresentation) {
+        try {
+            HumifortisEvent humiEvent = eventMapper.fromKeycloakAdminEvent(adminEvent);
+            sendAsync(humiEvent, "admin:" + adminEvent.getOperationType());
+        } catch (Exception e) {
+            logger.errorf("[HumifortisEventListener] Error processing admin event: %s",
+                    e.getMessage());
+        }
+    }
+
+    @Override
+    public void close() {}
+
+    // ── Feedback path ─────────────────────────────────────────────────────────
+
+    /**
+     * Returns true when the event is the dedicated risk-decision event fired
+     * by HumifortisRiskAuthenticator — identified by type + error sentinel.
+     */
+    private boolean isRiskDecisionEvent(Event event) {
+        return event.getType() == EventType.CUSTOM_REQUIRED_ACTION_ERROR
+                && RISK_EVENT_ERROR.equals(event.getError());
+    }
+
+    /**
+     * Reads risk details from the event and emits the appropriate Humifortis
+     * feedback event. The details are present because HumifortisRiskAuthenticator
+     * set them on this exact EventBuilder before calling .error(), which
+     * dispatched it synchronously to this listener.
+     */
+    private void emitFeedback(Event event) {
+        try {
+            String riskAction = detail(event, DETAIL_RISK_ACTION);
+            String riskScore  = detail(event, DETAIL_RISK_SCORE);
+            String riskLevel  = detail(event, DETAIL_RISK_LEVEL);
+            String riskReason = detail(event, DETAIL_RISK_REASON);
+            String blocked    = detail(event, DETAIL_RISK_BLOCKED);
+
+            if (riskAction == null) {
+                logger.warnf("[HumifortisEventListener] Risk decision event missing " +
+                        "HUMIFORTIS_RISK_ACTION detail — skipping feedback.");
+                return;
+            }
+
+            String feedbackType = resolveFeedbackType(riskAction, blocked);
+
+            logger.infof("[HumifortisEventListener] Emitting feedback: " +
+                            "feedbackType=%s action=%s score=%s level=%s blocked=%s",
+                    feedbackType, riskAction, riskScore, riskLevel, blocked);
 
             HumifortisEvent feedback = eventMapper.fromFeedback(
                     event, feedbackType,
@@ -100,32 +167,34 @@ public class HumifortisEventListener implements EventListenerProvider {
             sendAsync(feedback, feedbackType);
 
         } catch (Exception e) {
-            logger.warnf("Error emitting feedback event: %s", e.getMessage());
+            logger.warnf("[HumifortisEventListener] Error emitting feedback event: %s",
+                    e.getMessage());
         }
     }
 
-    @Override
-    public void onEvent(AdminEvent adminEvent, boolean includeRepresentation) {
-        try {
-            HumifortisEvent humiEvent =
-                    eventMapper.fromKeycloakAdminEvent(adminEvent);
-            sendAsync(humiEvent, "admin:" + adminEvent.getOperationType());
-        } catch (Exception e) {
-            logger.errorf("Error processing admin event: %s", e.getMessage());
+    /**
+     * Maps the risk action + block flag to a Humifortis feedback event_type.
+     *
+     *   action=ALLOW              → auth_decision_allow
+     *   BLOCKED=true              → auth_decision_block
+     *   any other action          → auth_decision_evaluated
+     */
+    private String resolveFeedbackType(String riskAction, String blocked) {
+        if ("ALLOW".equalsIgnoreCase(riskAction)) {
+            return "auth_decision_allow";
         }
+        if ("true".equalsIgnoreCase(blocked)) {
+            return "auth_decision_block";
+        }
+        return "auth_decision_evaluated";
     }
 
-    @Override
-    public void close() {}
-
-    // ----------------------------------------------------------------
-    // Single send path — all event types use this
-    // ----------------------------------------------------------------
+    // ── Shared helpers ────────────────────────────────────────────────────────
 
     private void sendAsync(HumifortisEvent event, String label) {
         saasClient.sendEventAsync(event)
                 .exceptionally(ex -> {
-                    logger.warnf("Failed to send [%s]: %s",
+                    logger.warnf("[HumifortisEventListener] Failed to send [%s]: %s",
                             label, ex.getMessage());
                     return null;
                 });
