@@ -20,11 +20,11 @@ public class EventMapper {
         HumifortisEvent humiEvent = new HumifortisEvent();
 
         String realmId = event.getRealmId() != null ? event.getRealmId() : "unknown";
-        String userId  = event.getUserId()  != null ? event.getUserId()  : detailOrFallback(event.getDetails(), "username", "anonymous");
-
-        // Prefer username from details for a stable identifier
-        String identifier = userId; // detailOrFallback(event.getDetails(), "username", userId);
-        humiEvent.setEntityId(String.format("user:keycloak:%s:%s", realmId, identifier));
+        String userId  = event.getUserId()  != null ? event.getUserId()  : detailOrFallback(event.getDetails(), "userId", null);
+        if (userId == null || userId.isBlank()) {
+            userId = detailOrFallback(event.getDetails(), "username", "anonymous");
+        }
+        humiEvent.setEntityId(String.format("user:keycloak:%s:%s", realmId, userId));
         humiEvent.setEntityType("user");
         humiEvent.setTimestamp(Instant.ofEpochMilli(event.getTime()).toString());
         humiEvent.setEventType(mapEventType(event.getType()));
@@ -46,9 +46,9 @@ public class EventMapper {
 
         String realmId = adminEvent.getRealmId() != null ? adminEvent.getRealmId() : "unknown";
         String adminId = adminEvent.getAuthDetails() != null
-                && adminEvent.getAuthDetails().getUserId() != null
-                ? adminEvent.getAuthDetails().getUserId()
-                : "admin";
+            && adminEvent.getAuthDetails().getUserId() != null
+            ? adminEvent.getAuthDetails().getUserId()
+            : "admin";
 
         humiEvent.setEntityId(String.format("user:keycloak:%s:%s", realmId, adminId));
         humiEvent.setEntityType("user");
@@ -71,7 +71,7 @@ public class EventMapper {
 
         // admin identity context
         if (adminEvent.getAuthDetails() != null) {
-            String clientId = adminEvent.getAuthDetails().getClientId();
+            String clientId  = adminEvent.getAuthDetails().getClientId();
             String ipAddress = adminEvent.getAuthDetails().getIpAddress();
             addCommonMetadata(humiEvent, realmId, clientId, ipAddress, null,
                     adminEvent.getError());
@@ -103,7 +103,7 @@ public class EventMapper {
 
         String realmId = originEvent.getRealmId() != null
                 ? originEvent.getRealmId() : "unknown";
-        // Try userId from event, else from details (set by adaptive auth logic)
+        // Prefer userId; fallback to username only if userId is missing
         String userId = originEvent.getUserId();
         if (userId == null || userId.isBlank()) {
             userId = detailOrFallback(originEvent.getDetails(), "userId", null);
@@ -111,10 +111,9 @@ public class EventMapper {
         if (userId == null || userId.isBlank()) {
             userId = detailOrFallback(originEvent.getDetails(), "username", "anonymous");
         }
-        String identifier = userId;
 
         humiEvent.setEntityId(
-                String.format("user:keycloak:%s:%s", realmId, identifier));
+            String.format("user:keycloak:%s:%s", realmId, userId));
         humiEvent.setEntityType("user");
         humiEvent.setTimestamp(
                 Instant.ofEpochMilli(originEvent.getTime()).toString());
@@ -164,7 +163,7 @@ public class EventMapper {
                 if ("CREATE".equals(o)) yield "grant_consent";
                 yield "admin_client_action";
             }
-            case "REALM" -> "realm_modified";
+            case "REALM"               -> "realm_modified";
             case "AUTHENTICATION_FLOW" -> "auth_flow_modified";
             case "IDENTITY_PROVIDER"   -> "idp_modified";
             default -> "admin_" + o.toLowerCase() + "_" + resourceType.toLowerCase();
@@ -237,6 +236,17 @@ public class EventMapper {
         // Network/device context
         putIfPresent(humiEvent, details, "user_agent");
         putIfPresent(humiEvent, details, "remember_me");
+
+        // Device fingerprint — injected by FingerprintJS in login.ftl
+        putIfPresent(humiEvent, details, "device_id");
+
+        // GeoIP fields — enriched by HumifortisEventListener via MaxMind
+        putIfPresent(humiEvent, details, "geo_country");
+        putIfPresent(humiEvent, details, "geo_city");
+        putIfPresent(humiEvent, details, "geo_lat");
+        putIfPresent(humiEvent, details, "geo_lon");
+        putIfPresent(humiEvent, details, "asn");
+        putIfPresent(humiEvent, details, "asn_org");
 
         // Client/redirect context — useful for OAuth abuse detection
         putIfPresent(humiEvent, details, "redirect_uri");
