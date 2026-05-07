@@ -106,10 +106,10 @@ public class HumifortisRBAAuthenticator implements Authenticator {
     }
 
     private String generateEntityId(AuthenticationFlowContext context, UserModel user) {
-        // Format: user:keycloak:{realm}:{username or email}
-        String realm = context.getRealm().getName();
-        String identifier = user.getEmail() != null ? user.getEmail() : user.getUsername();
-        return String.format("user:keycloak:%s:%s", realm, identifier);
+        // Format: user:keycloak:{realmId}:{userId}
+        String realmId = context.getRealm().getId();
+        String userId = user.getId() != null ? user.getId() : user.getUsername();
+        return String.format("user:keycloak:%s:%s", realmId, userId);
     }
 
     private void handleFallback(AuthenticationFlowContext context, String reason) {
