@@ -1,0 +1,5 @@
+// Device enrichment for HumifortisEventListener
+// Usage pattern from authenticator project:
+//   DeviceRepresentationContext deviceContext = UserContexts.getContext(session, DeviceRepresentationContext.class);
+//   var deviceRepresentation = deviceContext.getData(realm, user).orElse(null);
+// Use this pattern in the listener, with try-catch for safety.
