@@ -241,6 +241,13 @@ public class EventMapper {
         putIfPresent(humiEvent, details, "device_id");
 
         // GeoIP fields — enriched by HumifortisEventListener via MaxMind
+        // Normalize: accept both "country" and "geo_country" from different integrations
+        if (!details.containsKey("geo_country") && details.containsKey("country")) {
+            String c = details.get("country");
+            if (c != null && !c.isBlank()) {
+                humiEvent.addMetadata("geo_country", c);
+            }
+        }
         putIfPresent(humiEvent, details, "geo_country");
         putIfPresent(humiEvent, details, "geo_city");
         putIfPresent(humiEvent, details, "geo_lat");

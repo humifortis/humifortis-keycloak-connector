@@ -12,7 +12,7 @@ public class HumifortisEventListenerFactory implements EventListenerProviderFact
 
     @Override
     public EventListenerProvider create(KeycloakSession session) {
-        return new HumifortisEventListener();
+        return new HumifortisEventListener(session);
     }
 
     @Override

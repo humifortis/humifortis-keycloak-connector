@@ -1,0 +1,47 @@
+<#-- ============================================================
+     HUMIFORTIS — FingerprintJS device fingerprint injection
+     
+     PLACEMENT: paste this block immediately before </body> in your
+     Keycloak theme login.ftl file.
+     
+     PREREQUISITE: download FingerprintJS v4 open-source build:
+       https://github.com/fingerprintjs/fingerprintjs/releases
+     Copy fp.min.js to:
+       themes/<your-theme>/login/resources/js/fp.min.js
+     ============================================================ -->
+
+<script>
+(function () {
+  'use strict';
+
+  // Dynamically load the self-hosted FingerprintJS bundle.
+  // We use a self-hosted copy to avoid third-party network calls from the login page.
+  var script = document.createElement('script');
+  script.src = '${url.resourcesPath}/js/fp.min.js';
+  script.async = true;
+
+  script.onload = function () {
+    FingerprintJS.load()
+      .then(function (fp) { return fp.get(); })
+      .then(function (result) {
+        var form = document.getElementById('kc-form-login');
+        if (!form) return; // safety: do nothing if form not present
+
+        // device_id: stable visitor identifier from FingerprintJS
+        var inputDeviceId = document.createElement('input');
+        inputDeviceId.type  = 'hidden';
+        inputDeviceId.name  = 'device_id';
+        inputDeviceId.value = result.visitorId;
+        form.appendChild(inputDeviceId);
+      })
+      .catch(function () {
+        // Silent failure — never block the login form
+      });
+  };
+
+  // Also silent-fail if the script itself cannot load (e.g. offline, CSP)
+  script.onerror = function () {};
+
+  document.body.appendChild(script);
+})();
+</script>
