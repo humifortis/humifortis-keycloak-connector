@@ -21,7 +21,7 @@ buildNumber.properties
 
 # Compiled
 *.class
-*.jar
+#*.jar
 *.war
 *.ear
 
