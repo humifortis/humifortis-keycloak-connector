@@ -1,1 +1,3 @@
-tech.humifortis.keycloak.auth.HumifortisRBAAuthenticatorFactory
+tech.humifortis.keycloak.auth.HumifortisRiskAuthenticatorFactory
+tech.humifortis.keycloak.auth.HumifortisHighConditionFactory
+tech.humifortis.keycloak.auth.HumifortisRiskConditionFactory

@@ -265,6 +265,24 @@ public class EventMapper {
 
         // Credential type (for MFA events)
         putIfPresent(humiEvent, details, "credential_type");
+
+        // Account age — critical for new_account_new_device scoring
+        putIfPresent(humiEvent, details, "account_age_days");
+
+        // Privilege context — critical for off_hours_privileged detection
+        putIfPresent(humiEvent, details, "is_privileged");
+
+        // User roles — full list for granular scoring (comma-separated)
+        putIfPresent(humiEvent, details, "user_roles");
+
+        // Session concurrency — multiple parallel sessions = risk indicator
+        putIfPresent(humiEvent, details, "active_session_count");
+
+        // MFA enrollment status — password-only users are higher risk
+        putIfPresent(humiEvent, details, "mfa_enrolled");
+
+        // Identity provider — federated vs local login context
+        putIfPresent(humiEvent, details, "identity_provider");
     }
 
     private void putIfPresent(
