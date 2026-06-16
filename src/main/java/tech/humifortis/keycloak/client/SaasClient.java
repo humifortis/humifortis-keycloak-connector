@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
@@ -131,6 +132,60 @@ public class SaasClient {
             throw e;
         } catch (Exception e) {
             throw new SaasException("Failed to get risk decision", e);
+        }
+    }
+
+    /**
+     * Calls the /evaluate endpoint synchronously with full event context.
+     * This is used by the RBA authenticator during the login flow.
+     * The server performs GeoIP, UA parsing, device_id, and risk scoring.
+     *
+     * @param entityId   The entity identifier (e.g., "user:keycloak:realm:userId")
+     * @param entityType "user"
+     * @param eventType  "login"
+     * @param source     "keycloak"
+     * @param metadata   Raw context (ip, user_agent, roles, mfa_enrolled, etc.)
+     * @return RiskDecision with action, reason, score
+     */
+    public RiskDecision evaluate(String entityId, String entityType, String eventType,
+                                  String source, Map<String, Object> metadata) throws SaasException {
+        try {
+            JsonObject payload = new JsonObject();
+            payload.addProperty("entity_id", entityId);
+            payload.addProperty("entity_type", entityType);
+            payload.addProperty("event_type", eventType);
+            payload.addProperty("source", source);
+            payload.addProperty("timestamp", java.time.Instant.now().toString());
+            payload.add("metadata", gson.toJsonTree(metadata));
+
+            String requestUrl = apiUrl + "/evaluate";
+            String payloadJson = payload.toString();
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(requestUrl))
+                    .header("Content-Type", "application/json")
+                    .header("X-API-Key", apiKey)
+                    .header("X-Connector-Type", "keycloak")
+                    .header("X-Connector-Version", CONNECTOR_VERSION)
+                    .POST(HttpRequest.BodyPublishers.ofString(payloadJson))
+                    .timeout(Duration.ofMillis(timeoutMs))
+                    .build();
+
+            logger.debugf("Evaluate request: entity=%s url=%s", entityId, requestUrl);
+
+            HttpResponse<String> response = httpClient.send(
+                    request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 200) {
+                return gson.fromJson(response.body(), RiskDecision.class);
+            } else {
+                throw new SaasException(
+                        "Evaluate API error: " + response.statusCode() + " - " + response.body());
+            }
+        } catch (SaasException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new SaasException("Failed to evaluate risk", e);
         }
     }
 
