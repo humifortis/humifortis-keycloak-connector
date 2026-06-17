@@ -1,17 +1,5 @@
 package tech.humifortis.keycloak.auth;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.annotations.SerializedName;
-import org.jboss.logging.Logger;
-import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.RealmModel;
-import org.keycloak.models.UserModel;
-import tech.humifortis.keycloak.model.Risk;
-
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -27,6 +15,21 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+
+import org.jboss.logging.Logger;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
+import org.keycloak.models.UserModel;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.annotations.SerializedName;
+
+import tech.humifortis.keycloak.model.Risk;
 
 /**
  * Calls POST /api/v1/evaluate on Humifortis Core with the full authentication context.
@@ -163,7 +166,7 @@ public class HumifortisRiskEvaluator {
             payload.event             = event;
             payload.available_methods = detectAvailableMethods(knownUser);
 
-            String url = apiUrl + "/api/v1/evaluate";
+            String url = apiUrl + "/evaluate";
             logger.debugf("[HumifortisRiskEvaluator] POST %s entity=%s", url, entityId);
 
             HttpRequest req = HttpRequest.newBuilder()
