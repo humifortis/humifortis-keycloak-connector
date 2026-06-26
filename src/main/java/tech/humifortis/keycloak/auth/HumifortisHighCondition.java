@@ -14,9 +14,10 @@ import org.keycloak.models.UserModel;
  * <h3>Flow position</h3>
  * <pre>
  *   Browser Flow
- *     ├── Username / Password form       (Required)
- *     ├── Humifortis Risk Authenticator  (Required)  ← sets HUMIFORTIS_RISK_ACTION + LEVEL
- *     └── Force MFA (Conditional)
+ *     ├── Username / Password form          (Required, priority=10)
+ *     ├── Humifortis Device Collector       (Required, priority=15) ← collects device signals
+ *     ├── Humifortis Risk Authenticator     (Required, priority=20) ← sets HUMIFORTIS_RISK_ACTION + LEVEL
+ *     └── Force MFA (Conditional,          priority=30)
  *           ├── Condition — Humifortis high risk  (Required)  ← this class
  *           └── OTP / WebAuthn form               (Required)
  * </pre>

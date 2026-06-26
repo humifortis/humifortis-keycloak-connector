@@ -157,7 +157,7 @@ public class HumifortisRiskEvaluator {
             // Build payload
             EventPayload event = new EventPayload();
             event.entity_id   = entityId;
-            event.entity_type = "user";
+            event.entity_type = null; // leave empty so key = "{tenant}:risk::{entityId}" — consistent with API test injections
             event.event_type  = "auth_login_success";
             event.timestamp   = Instant.now().toString();
             event.metadata    = buildMetadata(realm, knownUser);
@@ -244,6 +244,88 @@ public class HumifortisRiskEvaluator {
             var as = session.getContext().getAuthenticationSession();
             String idp = as != null ? as.getAuthNote("identity_provider") : null;
             return (idp != null && !idp.isBlank()) ? idp : "local";
+        });
+
+        // Device signals — collected by HumifortisDeviceCollectorAuthenticator (step before this one)
+        safeCollect(meta, "device_id", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_ID) : null;
+        });
+        safeCollect(meta, "device_signals", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_SIGNALS) : null;
+        });
+        safeCollect(meta, "device_tz", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_TZ) : null;
+        });
+        safeCollect(meta, "device_screen", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_SCREEN) : null;
+        });
+        safeCollect(meta, "device_lang", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_LANG) : null;
+        });
+        safeCollect(meta, "device_color_depth", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_COLOR_DEPTH) : null;
+        });
+        safeCollect(meta, "device_cpu_cores", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_CPU_CORES) : null;
+        });
+        safeCollect(meta, "device_memory_gb", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_MEMORY_GB) : null;
+        });
+        safeCollect(meta, "device_touch", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_TOUCH) : null;
+        });
+        safeCollect(meta, "device_platform", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_PLATFORM) : null;
+        });
+        safeCollect(meta, "device_connection", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_CONNECTION) : null;
+        });
+        // GPU signals — used by enricher.go to compute device.server_fp (T1 replay detection)
+        safeCollect(meta, "device_webgl_vendor", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_WEBGL_VENDOR) : null;
+        });
+        safeCollect(meta, "device_webgl_renderer", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_WEBGL_RENDERER) : null;
+        });
+        // FP hash: SHA-256 of full components JSON (replaces truncated blob)
+        safeCollect(meta, "device_fp_hash", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_FP_HASH) : null;
+        });
+        // Binding result: server-validated anti-replay check ("valid"|"stale"|"mismatch"|"absent"|"error")
+        safeCollect(meta, "device_fp_binding_valid", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_BINDING_RESULT) : null;
+        });
+        // v2.2 passive discriminators
+        safeCollect(meta, "device_touch_points", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_TOUCH_POINTS) : null;
+        });
+        safeCollect(meta, "device_orientation", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_ORIENTATION) : null;
+        });
+        safeCollect(meta, "device_hash_perf_ms", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_HASH_PERF_MS) : null;
+        });
+        safeCollect(meta, "device_load_ms", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_LOAD_MS) : null;
         });
 
         // User attributes
@@ -369,9 +451,15 @@ public class HumifortisRiskEvaluator {
     // =========================================================================
 
     private static String buildEntityId(RealmModel realm, UserModel user) {
-        String userId  = user.getId() != null  ? user.getId()  : user.getUsername();
-        String realmId = realm.getId() != null ? realm.getId() : realm.getName();
-        return String.format("user:keycloak:%s:%s", realmId, userId);
+        // Standard entity_id format: user:keycloak:{realmName}:{keycloakUserUUID}
+        // This matches exactly what E2E tests use via ENV.USERS.alice.entityId and
+        // what the risk engine stores risk state under — ensuring consistent Redis keys
+        // between SPI evaluations and API-level test injections / resets.
+        String userId    = user.getId() != null && !user.getId().isBlank() ? user.getId() : "unknown";
+        String realmName = realm.getName() != null && !realm.getName().isBlank()
+                ? realm.getName()
+                : (realm.getId() != null ? realm.getId() : "unknown");
+        return String.format("user:keycloak:%s:%s", realmName, userId);
     }
 
     public static String envOrDefault(String key, String defaultValue) {

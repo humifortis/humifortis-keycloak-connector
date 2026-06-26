@@ -14,11 +14,13 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.UserSessionModel;
 
 import tech.humifortis.keycloak.client.SaasClient;
 import tech.humifortis.keycloak.client.SaasConfig;
 import tech.humifortis.keycloak.mapper.EventMapper;
 import tech.humifortis.keycloak.model.HumifortisEvent;
+import tech.humifortis.keycloak.auth.HumifortisDeviceCollectorAuthenticator;
 
 /**
  * Humifortis Event Listener — LEAN connector.
@@ -36,9 +38,9 @@ import tech.humifortis.keycloak.model.HumifortisEvent;
  *   - Identity provider
  *
  * NOT done here (moved to server):
- *   - MaxMind GeoIP lookup
- *   - User-Agent parsing
- *   - device_id computation
+ *   - GeoIP lookup (moved to humifortis-core — raw IP is forwarded as-is)
+ *   - User-Agent parsing (moved to humifortis-core)
+ *   - device_id computation (handled by HumifortisDeviceCollectorAuthenticator + FingerprintJS)
  */
 public class HumifortisEventListener implements EventListenerProvider {
 
@@ -77,26 +79,42 @@ public class HumifortisEventListener implements EventListenerProvider {
     private final SaasClient     saasClient;
     private final EventMapper    eventMapper;
     private final KeycloakSession session;
+    /** Set to true when SaasClient/SaasConfig init failed — all onEvent() calls are no-ops. */
+    private final boolean        disabled;
 
     public HumifortisEventListener(KeycloakSession session) {
+        this.session = session;
+        SaasClient  client  = null;
+        EventMapper mapper  = null;
+        boolean     isDisabled = false;
         try {
             SaasConfig config = new SaasConfig();
-            this.saasClient  = new SaasClient(config);
-            this.eventMapper = new EventMapper();
-            this.session     = session;
+            client  = new SaasClient(config);
+            mapper  = new EventMapper();
             logger.info("[HumifortisEventListener] Initialized (lean mode — server-side enrichment)");
         } catch (Exception e) {
-            logger.error("[HumifortisEventListener] Failed to initialize", e);
-            throw new RuntimeException("Failed to initialize Humifortis Event Listener", e);
+            logger.errorf("[HumifortisEventListener] Init failed — listener disabled for this request: %s",
+                    e.getMessage());
+            isDisabled = true;
         }
+        this.saasClient  = client;
+        this.eventMapper = mapper;
+        this.disabled    = isDisabled;
     }
 
     // ── Entry points ──────────────────────────────────────────────────────────
 
     @Override
     public void onEvent(Event event) {
+        if (disabled) return;  // init failed — skip silently
+
         logger.debugf("[HumifortisEventListener] Received event: type=%s error=%s realm=%s user=%s",
                 event.getType(), event.getError(), event.getRealmId(), event.getUserId());
+
+        // Path 0: deferred session revocation — safe post-LOGIN timing (session is now fully established)
+        if (event.getType() == EventType.LOGIN && event.getSessionId() != null) {
+            handleDeferredSessionRevocation(event);
+        }
 
         // Path A: risk decision feedback event (fired by authenticator)
         if (isRiskDecisionEvent(event)) {
@@ -122,6 +140,7 @@ public class HumifortisEventListener implements EventListenerProvider {
 
     @Override
     public void onEvent(AdminEvent adminEvent, boolean includeRepresentation) {
+        if (disabled) return;
         try {
             HumifortisEvent humiEvent = eventMapper.fromKeycloakAdminEvent(adminEvent);
             sendAsync(humiEvent, "admin:" + adminEvent.getOperationType());
@@ -252,6 +271,32 @@ public class HumifortisEventListener implements EventListenerProvider {
         } catch (Exception e) {
             logger.debugf("[HumifortisEventListener] identity_provider failed: %s", e.getMessage());
         }
+
+        // Step 9 — Device signals (pushed into event details by HumifortisDeviceCollectorAuthenticator
+        // via context.getEvent().detail(). If the event was fired post-flow and the detail is missing,
+        // we fall back to the AuthNote — which may still be accessible depending on Keycloak version.
+        // Each field is evaluated independently — a missing value for one does not block the others.)
+        try {
+            var as = session.getContext().getAuthenticationSession();
+            // STABLE
+            mergeDeviceDetail(event, as, "device_id",          HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_ID);
+            mergeDeviceDetail(event, as, "device_signals",     HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_SIGNALS);
+            // CONTEXTUAL
+            mergeDeviceDetail(event, as, "device_tz",          HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_TZ);
+            mergeDeviceDetail(event, as, "device_screen",      HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_SCREEN);
+            mergeDeviceDetail(event, as, "device_lang",        HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_LANG);
+            mergeDeviceDetail(event, as, "device_color_depth", HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_COLOR_DEPTH);
+            // HARDWARE
+            mergeDeviceDetail(event, as, "device_cpu_cores",   HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_CPU_CORES);
+            mergeDeviceDetail(event, as, "device_memory_gb",   HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_MEMORY_GB);
+            mergeDeviceDetail(event, as, "device_touch",       HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_TOUCH);
+            mergeDeviceDetail(event, as, "device_platform",    HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_PLATFORM);
+            mergeDeviceDetail(event, as, "device_connection",  HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_CONNECTION);
+            // BEHAVIORAL
+            mergeDeviceDetail(event, as, "device_load_ms",     HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_LOAD_MS);
+        } catch (Exception e) {
+            logger.debugf("[HumifortisEventListener] device signals enrichment failed: %s", e.getMessage());
+        }
     }
 
     // ── Feedback path ─────────────────────────────────────────────────────────
@@ -310,6 +355,7 @@ public class HumifortisEventListener implements EventListenerProvider {
 
     private void enrichFeedbackMetadata(HumifortisEvent feedback, Event event) {
         if (event.getDetails() == null) return;
+        // Risk decision context
         putDetailIfPresent(feedback, event, "playbook_rule");
         putDetailIfPresent(feedback, event, "enforced_action");
         putDetailIfPresent(feedback, event, "derived_signals");
@@ -317,6 +363,22 @@ public class HumifortisEventListener implements EventListenerProvider {
         putDetailIfPresent(feedback, event, "device_is_new");
         putDetailIfPresent(feedback, event, "device_is_trusted");
         putDetailIfPresent(feedback, event, "risk_score_numeric");
+        // Full device context — server correlates risk decisions with device fingerprints
+        // STABLE
+        putDetailIfPresent(feedback, event, "device_id");
+        // CONTEXTUAL
+        putDetailIfPresent(feedback, event, "device_tz");
+        putDetailIfPresent(feedback, event, "device_screen");
+        putDetailIfPresent(feedback, event, "device_lang");
+        putDetailIfPresent(feedback, event, "device_color_depth");
+        // HARDWARE
+        putDetailIfPresent(feedback, event, "device_cpu_cores");
+        putDetailIfPresent(feedback, event, "device_memory_gb");
+        putDetailIfPresent(feedback, event, "device_touch");
+        putDetailIfPresent(feedback, event, "device_platform");
+        putDetailIfPresent(feedback, event, "device_connection");
+        // BEHAVIORAL
+        putDetailIfPresent(feedback, event, "device_load_ms");
     }
 
     private void putDetailIfPresent(HumifortisEvent humiEvent, Event event, String key) {
@@ -341,5 +403,92 @@ public class HumifortisEventListener implements EventListenerProvider {
         if (event.getDetails() == null) return null;
         String v = event.getDetails().get(key);
         return (v != null && !v.isBlank()) ? v : null;
+    }
+
+    /** Copies an AuthNote value into the event details map if the note is present and non-blank. */
+    private void putAuthNote(Event event,
+                             org.keycloak.sessions.AuthenticationSessionModel as,
+                             String noteKey, String detailKey) {
+        try {
+            String value = as.getAuthNote(noteKey);
+            if (value != null && !value.isBlank()) {
+                event.getDetails().put(detailKey, value);
+            }
+        } catch (Exception e) {
+            logger.debugf("[HumifortisEventListener] putAuthNote(%s) failed: %s", noteKey, e.getMessage());
+        }
+    }
+
+    /**
+     * Merges a device signal into event details.
+     * Priority: event detail (set by DeviceCollector during the flow) → AuthNote fallback.
+     * Each field is evaluated independently so a missing detail for one field
+     * does not prevent other fields from being populated.
+     */
+    private void mergeDeviceDetail(Event event,
+                                   org.keycloak.sessions.AuthenticationSessionModel as,
+                                   String detailKey, String noteKey) {
+        try {
+            String existing = event.getDetails().get(detailKey);
+            if (existing != null && !existing.isBlank()) return; // already present from DeviceCollector
+            if (as == null) return;
+            String fromNote = as.getAuthNote(noteKey);
+            if (fromNote != null && !fromNote.isBlank()) {
+                event.getDetails().put(detailKey, fromNote);
+            }
+        } catch (Exception e) {
+            logger.debugf("[HumifortisEventListener] mergeDeviceDetail(%s) failed: %s", detailKey, e.getMessage());
+        }
+    }
+
+    // ── Deferred session revocation ────────────────────────────────────────────
+
+    /**
+     * Handles REVOKE_OTHER_SESSIONS that was deferred from the authenticator via
+     * {@code AuthenticationSessionModel.setUserSessionNote("HUMIFORTIS_REVOKE_SESSIONS","true")}.
+     *
+     * <p>Called on LOGIN event — the new user session is fully established and its ID is known,
+     * so we can correctly exclude it while revoking all other (older) sessions.
+     */
+    private void handleDeferredSessionRevocation(Event event) {
+        try {
+            String sessionId = event.getSessionId();
+            String realmId   = event.getRealmId();
+            if (sessionId == null || realmId == null) return;
+
+            RealmModel realm = session.realms().getRealm(realmId);
+            if (realm == null) return;
+
+            UserSessionModel currentSession = session.sessions().getUserSession(realm, sessionId);
+            if (currentSession == null) return;
+
+            String flag = currentSession.getNote("HUMIFORTIS_REVOKE_SESSIONS");
+            if (!"true".equals(flag)) return;
+
+            // Clear flag first — idempotency
+            currentSession.removeNote("HUMIFORTIS_REVOKE_SESSIONS");
+
+            String userId = event.getUserId();
+            if (userId == null) return;
+            UserModel user = session.users().getUserById(realm, userId);
+            if (user == null) return;
+
+            long count = session.sessions().getUserSessionsStream(realm, user)
+                    .filter(s -> !s.getId().equals(sessionId))
+                    .peek(s -> {
+                        session.sessions().removeUserSession(realm, s);
+                        logger.debugf("[HumifortisEventListener] Revoked old session %s for user=%s",
+                                s.getId(), user.getUsername());
+                    })
+                    .count();
+
+            if (count > 0) {
+                logger.infof("[HumifortisEventListener] REVOKE_OTHER_SESSIONS: revoked %d old session(s) " +
+                        "for user=%s, kept new session=%s", count, user.getUsername(), sessionId);
+            }
+        } catch (Exception e) {
+            logger.warnf("[HumifortisEventListener] handleDeferredSessionRevocation failed (non-blocking): %s",
+                    e.getMessage());
+        }
     }
 }

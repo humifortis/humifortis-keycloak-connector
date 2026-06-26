@@ -237,10 +237,22 @@ public class EventMapper {
         putIfPresent(humiEvent, details, "user_agent");
         putIfPresent(humiEvent, details, "remember_me");
 
-        // Device fingerprint — injected by FingerprintJS in login.ftl
+        // Device fingerprint — collected by HumifortisDeviceCollectorAuthenticator
+        // device_signals (raw JSON) is intentionally excluded here: too large for the event payload,
+        // it is sent directly to /evaluate by HumifortisRiskEvaluator.
         putIfPresent(humiEvent, details, "device_id");
+        putIfPresent(humiEvent, details, "device_tz");
+        putIfPresent(humiEvent, details, "device_screen");
+        putIfPresent(humiEvent, details, "device_lang");
+        putIfPresent(humiEvent, details, "device_color_depth");
+        putIfPresent(humiEvent, details, "device_cpu_cores");
+        putIfPresent(humiEvent, details, "device_memory_gb");
+        putIfPresent(humiEvent, details, "device_touch");
+        putIfPresent(humiEvent, details, "device_platform");
+        putIfPresent(humiEvent, details, "device_connection");
+        putIfPresent(humiEvent, details, "device_load_ms");
 
-        // GeoIP fields — enriched by HumifortisEventListener via MaxMind
+        // GeoIP fields — resolved server-side by humifortis-core (raw IP forwarded as-is by connector)
         // Normalize: accept both "country" and "geo_country" from different integrations
         if (!details.containsKey("geo_country") && details.containsKey("country")) {
             String c = details.get("country");

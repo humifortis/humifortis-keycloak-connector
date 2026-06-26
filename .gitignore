@@ -31,3 +31,15 @@ buildNumber.properties
 # Environment
 .env
 .env.local
+
+# Node / UI build deps (never commit node_modules)
+device-collector-ui/node_modules/
+device-collector-ui/dist/
+
+# GeoIP databases
+*.mmdb
+
+# Build artifacts
+*.bundle
+*.zip
+

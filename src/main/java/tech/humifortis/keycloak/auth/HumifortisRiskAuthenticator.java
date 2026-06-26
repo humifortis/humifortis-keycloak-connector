@@ -10,6 +10,7 @@ import org.keycloak.events.EventType;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import tech.humifortis.keycloak.HumifortisError;
 import tech.humifortis.keycloak.model.Risk;
 
 import java.util.List;
@@ -132,7 +133,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                     playbookRule);
             context.getAuthenticationSession().setAuthNote("humifortis_mode",         mode);
             context.getAuthenticationSession().setAuthNote("humifortis_would_action", serverAction);
-            if ("shadow".equals(mode)) executeSideActions(context, actions, serverDecision);
+            if ("shadow".equals(mode)) executeSideActions(context, serverAction, actions, serverDecision);
             context.success();
             return;
         }
@@ -152,26 +153,28 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         switch (action) {
             case "ALLOW" -> {
                 logger.debugf("[HumifortisRiskAuthenticator] ALLOW");
-                executeSideActions(context, actions, serverDecision);
+                executeSideActions(context, "ALLOW", actions, serverDecision);
                 context.success();
             }
 
             case "REQUIRE_MFA", "REQUIRE_WEBAUTHN", "REQUIRE_EMAIL_OTP" -> {
                 // success() here — HumifortisHighCondition in the sub-flow triggers actual MFA
                 logger.infof("[HumifortisRiskAuthenticator] %s → delegating to MFA sub-flow", action);
-                executeSideActions(context, actions, serverDecision);
+                executeSideActions(context, action, actions, serverDecision);
                 context.success();
             }
 
             case "DENY" -> {
                 logger.warnf("[HumifortisRiskAuthenticator] DENY — %s", risk.getReason().orElse(""));
                 context.getAuthenticationSession().setAuthNote(NOTE_RISK_BLOCKED, "true");
-                executeSideActions(context, actions, serverDecision);
+                executeSideActions(context, "DENY", actions, serverDecision);
                 context.failure(AuthenticationFlowError.ACCESS_DENIED,
                         context.form()
-                                .setError("access_denied_risk",
-                                        risk.getReason().orElse("Suspicious activity detected"))
-                                .createErrorPage(Response.Status.FORBIDDEN));
+                                .setAttribute("hfErrorCode",       HumifortisError.ACCESS_DENIED_RISK.code)
+                                .setAttribute("hfErrorMessageKey",  HumifortisError.ACCESS_DENIED_RISK.messageKey())
+                                .setAttribute("hfErrorDetailKey",   HumifortisError.ACCESS_DENIED_RISK.messageDetailKey())
+                                .setAttribute("hfTimestamp",        java.time.Instant.now().toString())
+                                .createForm("humifortis-error.ftl"));
             }
 
             case "LOCK_ACCOUNT" -> {
@@ -181,9 +184,11 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                 revokeAllSessions(context);
                 context.failure(AuthenticationFlowError.ACCESS_DENIED,
                         context.form()
-                                .setError("account_locked_risk",
-                                        "Your account has been locked due to suspicious activity.")
-                                .createErrorPage(Response.Status.FORBIDDEN));
+                                .setAttribute("hfErrorCode",       HumifortisError.ACCOUNT_LOCKED.code)
+                                .setAttribute("hfErrorMessageKey",  HumifortisError.ACCOUNT_LOCKED.messageKey())
+                                .setAttribute("hfErrorDetailKey",   HumifortisError.ACCOUNT_LOCKED.messageDetailKey())
+                                .setAttribute("hfTimestamp",        java.time.Instant.now().toString())
+                                .createForm("humifortis-error.ftl"));
             }
 
             default -> {
@@ -197,16 +202,51 @@ public class HumifortisRiskAuthenticator implements Authenticator {
     // SIDE ACTIONS
     // =========================================================================
 
+    /**
+     * Executes playbook side-effect actions.
+     *
+     * <p><strong>REVOKE_OTHER_SESSIONS timing strategy</strong>:
+     * <ul>
+     *   <li>For {@code DENY} / {@code LOCK_ACCOUNT}: revoke <em>immediately</em> — the flow is
+     *       about to fail, no new session will be created, so direct revocation is safe and correct.</li>
+     *   <li>For {@code ALLOW} / {@code REQUIRE_MFA*}: defer via
+     *       {@link org.keycloak.sessions.AuthenticationSessionModel#setUserSessionNote} so that
+     *       {@code HumifortisEventListener} can safely exclude the <em>newly-created</em> session
+     *       (whose ID is only known after {@code LOGIN} fires) when revoking all others.</li>
+     * </ul>
+     *
+     * @param primaryAction the main enforcement decision driving this call
+     */
     private void executeSideActions(AuthenticationFlowContext context,
+                                    String primaryAction,
                                     List<String> actions,
                                     HumifortisRiskEvaluator.EvaluateResponse serverDecision) {
         if (actions == null || actions.isEmpty()) return;
+        boolean isBlocking = "DENY".equals(primaryAction) || "LOCK_ACCOUNT".equals(primaryAction);
         for (String a : actions) {
             switch (a) {
-                case "REVOKE_OTHER_SESSIONS" -> revokeOtherSessions(context);
-                case "NOTIFY_SOC"            ->
-                        logger.infof("[HumifortisRiskAuthenticator] NOTIFY_SOC (server handles delivery)");
-                case "NOTIFY_USER"           -> sendSecurityEmail(context, "security_alert", serverDecision);
+                case "REVOKE_OTHER_SESSIONS" -> {
+                    if (isBlocking) {
+                        // Flow is about to fail — safe to revoke directly
+                        revokeOtherSessions(context);
+                    } else {
+                        // Flow is about to succeed — defer to EventListener (post-LOGIN)
+                        // so we can properly identify and exclude the brand-new session.
+                        try {
+                            context.getAuthenticationSession()
+                                   .setUserSessionNote("HUMIFORTIS_REVOKE_SESSIONS", "true");
+                            logger.infof("[HumifortisRiskAuthenticator] REVOKE_OTHER_SESSIONS deferred " +
+                                    "to EventListener for user=%s",
+                                    context.getUser() != null ? context.getUser().getUsername() : "?");
+                        } catch (Exception e) {
+                            logger.warnf("[HumifortisRiskAuthenticator] defer failed, direct fallback: %s",
+                                    e.getMessage());
+                            revokeOtherSessions(context);
+                        }
+                    }
+                }
+                case "NOTIFY_SOC"  -> logger.infof("[HumifortisRiskAuthenticator] NOTIFY_SOC (server handles delivery)");
+                case "NOTIFY_USER" -> sendSecurityEmail(context, "security_alert", serverDecision);
                 // Primary action names may appear in the list — skip silently
             }
         }
@@ -368,13 +408,21 @@ public class HumifortisRiskAuthenticator implements Authenticator {
             var realm = context.getRealm();
             var user  = context.getUser();
             if (user == null) return;
-            String current = context.getAuthenticationSession().getParentSession().getId();
-            context.getSession().sessions().getUserSessionsStream(realm, user)
-                    .filter(s -> !s.getId().equals(current))
-                    .forEach(s -> {
+            // NOTE: At this point in the auth flow, no user session exists yet (it is created only
+            // after context.success() completes the entire flow). The root auth session ID is NOT
+            // a user session ID. We intentionally revoke ALL existing user sessions so that on next
+            // successful login only the newly-created session is active.
+            long count = context.getSession().sessions().getUserSessionsStream(realm, user)
+                    .peek(s -> {
                         context.getSession().sessions().removeUserSession(realm, s);
-                        logger.debugf("[HumifortisRiskAuthenticator] Revoked session %s", s.getId());
-                    });
+                        logger.debugf("[HumifortisRiskAuthenticator] Revoked pre-existing session %s for user %s",
+                                s.getId(), user.getUsername());
+                    })
+                    .count();
+            if (count > 0) {
+                logger.infof("[HumifortisRiskAuthenticator] REVOKE_OTHER_SESSIONS: revoked %d session(s) for user %s",
+                        count, user.getUsername());
+            }
         } catch (Exception e) {
             logger.warnf("[HumifortisRiskAuthenticator] revokeOtherSessions failed: %s", e.getMessage());
         }

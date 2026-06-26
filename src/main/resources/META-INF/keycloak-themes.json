@@ -1,0 +1,9 @@
+{
+  "themes": [
+    {
+      "name": "humifortis",
+      "types": ["login"]
+    }
+  ]
+}
+

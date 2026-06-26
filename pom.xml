@@ -27,7 +27,7 @@
         <maven.compiler.target>17</maven.compiler.target>
         <keycloak.version>23.0.3</keycloak.version>
         <gson.version>2.10.1</gson.version>
-        <maxmind.version>4.2.0</maxmind.version>
+        <!-- GeoIP and UA parsing removed — handled server-side by humifortis-core -->
     </properties>
 
     <dependencies>
@@ -60,24 +60,11 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- JSON processing -->
+        <!-- JSON processing — only runtime dep bundled in the shaded JAR -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
             <version>${gson.version}</version>
-        </dependency>
-
-        <!-- MaxMind GeoIP2 — City + ASN lookup -->
-        <dependency>
-            <groupId>com.maxmind.geoip2</groupId>
-            <artifactId>geoip2</artifactId>
-            <version>${maxmind.version}</version>
-        </dependency>
-
-        <dependency>
-           <groupId>com.github.ua-parser</groupId>
-           <artifactId>uap-java</artifactId>
-           <version>1.6.1</version>
         </dependency>
 
         <!-- Logging (provided by Keycloak) -->
@@ -87,11 +74,72 @@
             <version>3.5.3.Final</version>
             <scope>provided</scope>
         </dependency>
+
+        <!-- ── Test dependencies ── -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>5.11.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>5.11.0</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- jboss-logging impl for tests (provided by Keycloak in prod) -->
+        <dependency>
+            <groupId>org.jboss.slf4j</groupId>
+            <artifactId>slf4j-jboss-logmanager</artifactId>
+            <version>2.0.1.Final</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.13</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
         <finalName>humifortis-keycloak-connector</finalName>
         <plugins>
+            <!-- ── Copy JS bundle from device-collector-ui/dist into the theme ── -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.3.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-js-bundle</id>
+                        <phase>generate-resources</phase>
+                        <goals><goal>copy-resources</goal></goals>
+                        <configuration>
+                            <outputDirectory>
+                                ${project.basedir}/src/main/resources/theme/humifortis/login/resources/js
+                            </outputDirectory>
+                            <overwrite>true</overwrite>
+                            <resources>
+                                <resource>
+                                    <directory>${project.basedir}/device-collector-ui/dist</directory>
+                                    <includes>
+                                        <include>humifortis-device.bundle.js</include>
+                                    </includes>
+                                    <filtering>false</filtering>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
@@ -99,6 +147,14 @@
                 <configuration>
                     <source>17</source>
                     <target>17</target>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+                <configuration>
+                    <useModulePath>false</useModulePath>
                 </configuration>
             </plugin>
             <plugin>
@@ -114,13 +170,8 @@
                         <configuration>
                             <artifactSet>
                                 <includes>
+                                    <!-- Only gson is bundled — all other deps are provided by Keycloak -->
                                     <include>com.google.code.gson:gson</include>
-                                    <!-- MaxMind and its transitive deps -->
-                                    <include>com.maxmind.geoip2:geoip2</include>
-                                    <include>com.maxmind.db:maxmind-db</include>
-                                    <include>com.fasterxml.jackson.core:jackson-databind</include>
-                                    <include>com.fasterxml.jackson.core:jackson-core</include>
-                                    <include>com.fasterxml.jackson.core:jackson-annotations</include>
                                 </includes>
                             </artifactSet>
                             <filters>
