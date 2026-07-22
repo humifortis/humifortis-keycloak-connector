@@ -144,6 +144,18 @@
     <!-- hash_perf_ms: SHA-256 CPU benchmark — 1-15ms=real browser, 50-200ms=slow VM/bot -->
     <input type="hidden" id="device_hash_perf_ms"  name="device_hash_perf_ms"  value="" />
 
+    <!-- MATH / FPU FINGERPRINT (v2.3) -->
+    <!-- math_hash: SHA-256 of stable-stringified Math results — FPU drift detection cross-session -->
+    <input type="hidden" id="device_math_hash"        name="device_math_hash"        value="" />
+    <!-- fpu_class: "arm64"|"x86_64"|"unknown" — cross-validated with platform and WebGL vendor -->
+    <input type="hidden" id="device_fpu_class"        name="device_fpu_class"        value="" />
+    <!-- math_anomaly: "1" if NaN/Infinity detected — headless/instrumented engine marker -->
+    <input type="hidden" id="device_math_anomaly"     name="device_math_anomaly"     value="" />
+    <!-- math_exec_ms: Math.sin(1) timing in µs (value IS µs, field name kept for compat) -->
+    <input type="hidden" id="device_math_exec_ms"     name="device_math_exec_ms"     value="" />
+    <!-- math_consistency: abs(sin²+cos²−1) deviation — detects patched Math engines -->
+    <input type="hidden" id="device_math_consistency" name="device_math_consistency" value="" />
+
     <!-- BEHAVIORAL signal -->
     <input type="hidden" id="device_load_ms"      name="device_load_ms"     value="" />
 

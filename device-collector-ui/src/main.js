@@ -1,17 +1,30 @@
 /**
- * Humifortis Device Collector — main entry point  v2.2
+ * Humifortis Device Collector — main entry point  v2.5
  *
- * v2.2 additions (free hardening, no FingerprintJS Pro required):
- *  1. WebGL canvas dedup — single GL context for vendor+renderer, prevents inconsistency.
- *  2. device_touch_points — actual maxTouchPoints count (0/1/5/10), not just boolean.
- *  3. device_orientation — screen.orientation.type ("portrait-primary" etc).
- *  4. device_hash_perf_ms — SubtleCrypto SHA-256 CPU benchmark.
- *       Real browser on real hardware: 1-15ms. Slow VM/bot farm: 50-200ms. Blocked: absent.
+ * v2.5 — Removed localStorage UUID (spoofable). Device identity strategy:
  *
- * v2.1 (in place):
- *  - Truncation fix: sha256hex(full JSON) + buildSignalsSubset (always valid JSON)
- *  - Anti-replay nonce: binding = SHA-256(nonce:timestamp:visitorId)
- *  - Platform: UACH → UA parse → navigator.platform (3-tier degradation)
+ *   device_id  = FingerprintJS free visitorId (hardware-derived, hard to fake at scale).
+ *                NOT a security secret — used only for device recognition heuristics.
+ *
+ *   TRUST is established exclusively via the HttpOnly cookie "hf_trust":
+ *     - Generated server-side (Java/Keycloak) after explicit MFA + "Trust this device"
+ *     - Never readable by JS (HttpOnly) — impossible to spoof from the browser
+ *     - SHA-256(cookie) matched server-side → browser_token_valid = true → ALLOW
+ *
+ *   Why NOT localStorage UUID (v2.4 approach):
+ *     - Trivially spoofable: localStorage.setItem('hf_device_id', victimUUID)
+ *     - Adds no security — the cookie already handles trusted-device bypass
+ *     - FingerprintJS visitorId requires matching real hardware signals to spoof
+ *
+ * v2.3 additions — Math/FPU fingerprint (anti-VM, anti-spoof):
+ *  1. device_math_hash     — SHA-256 of stableStringify(Math results).
+ *  2. device_fpu_class     — "arm64"|"x86_64"|"unknown".
+ *  3. device_math_anomaly  — "1" if NaN/Infinity detected.
+ *  4. device_math_exec_ms  — Math.sin(1) timing in µs.
+ *  5. device_math_consistency — abs(sin²+cos²−1) deviation.
+ *
+ * v2.2: WebGL dedup, touch_points, orientation, hash_perf_ms.
+ * v2.1: sha256hex full JSON, anti-replay nonce, platform 3-tier degradation.
  */
 import FingerprintJS from '@fingerprintjs/fingerprintjs'
 
@@ -36,12 +49,13 @@ async function collect() {
     const fp     = await FingerprintJS.load()
     const result = await fp.get()
 
-    // ── STABLE ────────────────────────────────────────────────────────────────
+    // ── STABLE DEVICE IDENTITY ────────────────────────────────────────────────
+    // device_id = FingerprintJS visitorId: hardware-derived, not a security secret.
+    // Trusted-device bypass is handled exclusively by the server-issued HttpOnly
+    // "hf_trust" cookie (browser_token_valid signal in the risk pipeline).
     setField('device_id', result.visitorId)
 
-    // FP signals: SHA-256 hash of FULL components + structured high-entropy subset.
-    // device_fp_hash → stable reference for cross-login drift detection (two-signal matrix)
-    // device_signals → always-valid JSON subset (canvas, audio, counts) under 2 KB
+    // FP signals: SHA-256 of full components JSON + high-entropy structured subset.
     const signalsJson = JSON.stringify(result.components)
     const fpHash = await sha256hex(signalsJson)
     if (fpHash) setField('device_fp_hash', fpHash)
@@ -64,10 +78,12 @@ async function collect() {
 
     // ── HARDWARE ──────────────────────────────────────────────────────────────
     setField('device_cpu_cores',  safeGet(() => String(navigator.hardwareConcurrency)))
-    setField('device_memory_gb',  safeGet(() => String(navigator.deviceMemory)))
+    setField('device_memory_gb',  safeGet(() => {
+      const m = navigator.deviceMemory
+      return m !== undefined ? String(m) : 'unknown'
+    }))
     setField('device_touch',      safeGet(() => String(navigator.maxTouchPoints > 0)))
 
-    // Platform: UACH → UA parse → navigator.platform (last resort)
     setField('device_platform', safeGet(() => {
       if (navigator.userAgentData?.platform) return navigator.userAgentData.platform
       const ua = navigator.userAgent
@@ -84,10 +100,10 @@ async function collect() {
 
     setField('device_connection', safeGet(() => {
       const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection
-      return c ? (c.effectiveType || c.type || 'unknown') : null
+      return c ? (c.effectiveType || c.type || 'unknown') : 'unknown'
     }))
 
-    // ── GPU — single canvas context (v2.2: dedup prevents inconsistency) ──────
+    // ── GPU (v2.2 dedup: single context) ─────────────────────────────────────
     const glInfo = safeGet(() => {
       const canvas = document.createElement('canvas')
       const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl')
@@ -105,26 +121,74 @@ async function collect() {
     }
 
     // ── PASSIVE DISCRIMINATORS (v2.2) ─────────────────────────────────────────
-
-    // Actual touch point count: 0=desktop, 1=pen tablet, 5=phone, 10=high-end tablet.
-    // More discriminant than boolean. Used in server-side two-signal drift matrix.
     setField('device_touch_points', safeGet(() => String(navigator.maxTouchPoints)))
+    setField('device_orientation',  safeGet(() => screen.orientation?.type || null))
 
-    // Screen orientation: "portrait-primary"|"landscape-primary"|"landscape-secondary".
-    // Mobile defaults to portrait-primary; desktops typically landscape-primary or absent.
-    setField('device_orientation', safeGet(() => screen.orientation?.type || null))
-
-    // SubtleCrypto SHA-256 benchmark (ms) — lightweight CPU speed signal.
-    //   Real browser/hardware: 1-15ms  (native crypto acceleration)
-    //   Slow VM / bot farm:    50-200ms (software fallback, shared CPU)
-    //   SubtleCrypto blocked:  field absent (itself a signal)
-    // Must run AFTER fp.get() so it does not distort device_load_ms.
     const hashBenchStart = performance.now()
     await sha256hex('humifortis-benchmark-probe')
     setField('device_hash_perf_ms', String(Math.round(performance.now() - hashBenchStart)))
 
+    // ── MATH / FPU FINGERPRINT (v2.3) ─────────────────────────────────────────
+    const mathRaw = safeGet(() => {
+      const r = {}
+      r.sin    = Math.sin(-1e300)
+      r.cos    = Math.cos(10.000000000123)
+      r.tan    = Math.tan(10.000000000123)
+      r.asin   = Math.asin(0.123124234234234242)
+      r.acos   = Math.acos(0.123124234234234242)
+      r.atan   = Math.atan(0.5)
+      r.atan2  = Math.atan2(1e-310, 1e-310)
+      r.sinh   = Math.sinh(1)
+      r.cosh   = Math.cosh(10)
+      r.tanh   = Math.tanh(-2)
+      r.log    = Math.log(1e-310)
+      r.log1p  = Math.log1p(-9.881312916824931e-324)
+      r.log2   = Math.log2(1e-310)
+      r.exp    = Math.exp(1)
+      r.expm1  = Math.expm1(1)
+      r.pow    = Math.pow(-1e300, -1)
+      r.sqrt   = Math.sqrt(1e-310)
+      r.cbrt   = Math.cbrt(100)
+      r.hypot  = Math.hypot(1, 2)
+      r.clz32  = Math.clz32(1)
+      r.imul   = Math.imul(Math.pow(2, 53), 5)
+      r.fround = Math.fround(5.5)
+      r.sign   = Math.sign(-0)
+      r.trunc  = Math.trunc(-0.5)
+      r.round  = Math.round(-0.5)
+      r.ceil   = Math.ceil(-1e-10)
+      r._neg_zero = (1 / Math.sign(-0)) === -Infinity ? '-0' : '0'
+      return r
+    })
+
+    if (mathRaw) {
+      const anomaly = Object.values(mathRaw).some(v =>
+        typeof v === 'number' && (Number.isNaN(v) || !Number.isFinite(v)))
+      setField('device_math_anomaly', anomaly ? '1' : '0')
+
+      const armHints = [
+        mathRaw.fround !== 5.5,
+        mathRaw.atan2  !== 0.7853981633974483,
+        mathRaw.log1p  !== -Infinity,
+      ]
+      const armScore = armHints.filter(Boolean).length
+      setField('device_fpu_class', armScore >= 2 ? 'arm64' : armScore === 0 ? 'x86_64' : 'unknown')
+
+      const mathHash = await sha256hex(stableStringify(mathRaw))
+      if (mathHash) setField('device_math_hash', mathHash)
+
+      const consVal = safeGet(() => {
+        const x = 10.000000000123
+        return Math.abs(Math.sin(x) * Math.sin(x) + Math.cos(x) * Math.cos(x) - 1.0)
+      })
+      if (consVal !== null) setField('device_math_consistency', consVal.toFixed(6))
+
+      const mt0 = performance.now()
+      Math.sin(1)
+      setField('device_math_exec_ms', ((performance.now() - mt0) * 1000).toFixed(3))
+    }
+
     // ── BEHAVIORAL ────────────────────────────────────────────────────────────
-    // DetectBotLoadTime: <50ms=headless, 200-1500ms=human, >8000ms=safety timer
     setField('device_load_ms', safeGet(() => String(Date.now() - PAGE_LOAD_AT)))
 
   } catch (err) {
@@ -139,8 +203,26 @@ async function collect() {
 }
 
 /**
- * sha256hex — SHA-256 via SubtleCrypto (W3C standard, non-deprecated, all modern browsers).
- * Returns lowercase hex string, or null on any error (fail-open — never blocks login).
+ * stableStringify — canonical JSON for Math objects (order-independent, IEEE-normalised).
+ */
+function stableStringify(obj) {
+  return JSON.stringify(
+    Object.keys(obj).sort().reduce((acc, key) => {
+      let v = obj[key]
+      if (typeof v === 'number') {
+        if      (Number.isNaN(v))  v = 'NaN'
+        else if (v === Infinity)   v = '+Infinity'
+        else if (v === -Infinity)  v = '-Infinity'
+        else                       v = Number(v.toPrecision(15))
+      }
+      acc[key] = v
+      return acc
+    }, {})
+  )
+}
+
+/**
+ * sha256hex — SHA-256 via SubtleCrypto. Returns hex string or null (fail-open).
  */
 async function sha256hex(data) {
   try {
@@ -156,9 +238,6 @@ async function sha256hex(data) {
 
 /**
  * buildSignalsSubset — highest-entropy FP components, always valid JSON, always < 2 KB.
- * canvas + audio: highest entropy (rendered hashes, very stable between logins).
- * fonts/plugins: summarised as counts to avoid list bloat.
- * Full JSON SHA-256 sent separately as device_fp_hash.
  */
 function buildSignalsSubset(components) {
   const c = components || {}
@@ -169,6 +248,8 @@ function buildSignalsSubset(components) {
     plugins_count: safeGet(() => Array.isArray(c.plugins?.value) ? c.plugins.value.length : null),
     webgl:         safeGet(() => c.webgl?.value          ?? null),
     color_gamut:   safeGet(() => c.colorGamut?.value     ?? null),
+    math_hash:     safeGet(() => document.getElementById('device_math_hash')?.value  || null),
+    fpu_class:     safeGet(() => document.getElementById('device_fpu_class')?.value  || null),
   }
 }
 

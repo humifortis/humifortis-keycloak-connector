@@ -62,6 +62,22 @@ public class HumifortisRiskAuthenticator implements Authenticator {
     public static final String NOTE_RISK_REASON  = "HUMIFORTIS_RISK_REASON";
     public static final String NOTE_RISK_BLOCKED = "HUMIFORTIS_RISK_BLOCKED";
 
+    /**
+     * Stamped on the auth session (authNote) AND on the Keycloak event detail
+     * when the risk engine enforces MFA. Dual-source ensures the flag survives
+     * all Keycloak flow variants (auth session may be unavailable on LOGIN event).
+     * HumifortisEventListener reads this to emit auth_mfa_success before auth_login_success.
+     */
+    public static final String NOTE_MFA_ENFORCED = "HUMIFORTIS_MFA_ENFORCED";
+
+    /**
+     * Verified-Unblock challenge id (dual-source: authNote + event detail), stamped
+     * when the server downgrades a DENY to a step-up MFA because an admin opened a
+     * verification window. HumifortisEventListener echoes it in auth_mfa_success so
+     * humifortis-core can bind the MFA to this challenge and clear the block.
+     */
+    public static final String NOTE_CHALLENGE_ID = "HUMIFORTIS_CHALLENGE_ID";
+
     /** Sentinel error tag on the feedback event — matched by HumifortisEventListener. */
     public static final String RISK_EVENT_SENTINEL = "humifortis_risk_decision";
 
@@ -87,8 +103,17 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                 context.getUser() != null ? context.getUser().getUsername() : "null");
 
         // Step 1 — evaluate risk
+        // Extract the Keycloak root auth session id (= code_id in OIDC browser flows).
+        // This is used as flow_id so auth_credential_verified is grouped with the
+        // enforcement events (auth_decision_*) that share the same session.
+        String flowId = null;
+        try {
+            flowId = context.getAuthenticationSession().getParentSession().getId();
+        } catch (Exception e) {
+            logger.debugf("[HumifortisRiskAuthenticator] Could not extract flowId: %s", e.getMessage());
+        }
         HumifortisRiskEvaluator evaluator = new HumifortisRiskEvaluator(context.getSession());
-        Risk risk = evaluator.evaluate(context.getRealm(), context.getUser());
+        Risk risk = evaluator.evaluate(context.getRealm(), context.getUser(), flowId);
 
         // Step 2 — read server decision (always clean up thread-local)
         HumifortisRiskEvaluator.EvaluateResponse serverDecision;
@@ -120,6 +145,19 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         // Step 3 — store in auth session for downstream conditions
         context.getAuthenticationSession().setAuthNote(NOTE_RISK_LEVEL,  riskLevel);
         context.getAuthenticationSession().setAuthNote(NOTE_RISK_ACTION, serverAction);
+
+        // Step 3b — Verified-Unblock: if the server opened a verification window it
+        // returns a challenge_id alongside a REQUIRE_MFA* step-up. Stamp it dual-source
+        // (authNote survives the MFA sub-flow; event detail survives the LOGIN event)
+        // so HumifortisEventListener can echo it in auth_mfa_success for challenge binding.
+        if (serverDecision != null && notBlank(serverDecision.verification_challenge_id)) {
+            context.getAuthenticationSession().setAuthNote(NOTE_CHALLENGE_ID, serverDecision.verification_challenge_id);
+            context.getEvent().detail(NOTE_CHALLENGE_ID, serverDecision.verification_challenge_id);
+            logger.infof("[HumifortisRiskAuthenticator] Verified-Unblock challenge active: id=%s level=%s → step-up %s",
+                    serverDecision.verification_challenge_id,
+                    nvl(serverDecision.verification_required_level, "AAL2"),
+                    serverAction);
+        }
 
         // Step 4 — fire feedback event (best-effort, never blocks auth)
         fireRiskDecisionEvent(context, risk, serverAction, riskLevel, playbookRule, serverDecision);
@@ -158,8 +196,12 @@ public class HumifortisRiskAuthenticator implements Authenticator {
             }
 
             case "REQUIRE_MFA", "REQUIRE_WEBAUTHN", "REQUIRE_EMAIL_OTP" -> {
-                // success() here — HumifortisHighCondition in the sub-flow triggers actual MFA
+                // success() here — HumifortisHighCondition in the sub-flow triggers actual MFA.
+                // Dual-source stamp: authNote (survives the flow) + event detail (for the LOGIN event).
+                // HumifortisEventListener reads either source to emit auth_mfa_success.
                 logger.infof("[HumifortisRiskAuthenticator] %s → delegating to MFA sub-flow", action);
+                context.getAuthenticationSession().setAuthNote(NOTE_MFA_ENFORCED, "true");
+                context.getEvent().detail(NOTE_MFA_ENFORCED, "true");
                 executeSideActions(context, action, actions, serverDecision);
                 context.success();
             }
@@ -192,7 +234,10 @@ public class HumifortisRiskAuthenticator implements Authenticator {
             }
 
             default -> {
-                logger.warnf("[HumifortisRiskAuthenticator] Unknown action '%s' → ALLOW", action);
+                // NOTIFY_USER / NOTIFY_SOC may appear as primary when rule has only side-effect
+                // actions — treat as ALLOW and still fire side effects.
+                logger.warnf("[HumifortisRiskAuthenticator] Unknown primary action '%s' → ALLOW (side-effects still run)", action);
+                executeSideActions(context, "ALLOW", actions, serverDecision);
                 context.success();
             }
         }

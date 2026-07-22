@@ -7,6 +7,30 @@ import com.google.gson.annotations.SerializedName;
 
 public class HumifortisEvent {
 
+    /**
+     * Source event ID — the UUID assigned by the origin system (Keycloak event.getId()).
+     * Used by humifortis-core for idempotent deduplication:
+     *   same event_id = skip re-processing even on retries or network duplicates.
+     * Null for synthetic events that have no upstream ID.
+     */
+    @SerializedName("event_id")
+    private String eventId;
+
+    /**
+     * Flow ID — the authentication session identifier that groups all events
+     * belonging to a single authentication attempt (login → MFA → decision).
+     *
+     * Extraction priority (Keycloak):
+     *   1. event.getDetails().get("authSessionId")   — standard auth flows
+     *   2. event.getDetails().get("code_id")          — OIDC authorization code flows
+     *   3. event.getSessionId()                        — post-auth fallback
+     *
+     * MANDATORY for all auth events — must never be null/empty.
+     * humifortis-core rejects auth events without a flow_id.
+     */
+    @SerializedName("flow_id")
+    private String flowId;
+
     @SerializedName("entity_id")
     private String entityId;
 
@@ -32,6 +56,12 @@ public class HumifortisEvent {
     public HumifortisEvent() {
         this.metadata = new HashMap<>();
     }
+
+    public String getEventId() { return eventId; }
+    public void setEventId(String eventId) { this.eventId = eventId; }
+
+    public String getFlowId() { return flowId; }
+    public void setFlowId(String flowId) { this.flowId = flowId; }
 
     public String getEntityId() { return entityId; }
     public void setEntityId(String entityId) { this.entityId = entityId; }

@@ -83,7 +83,18 @@ public class HumifortisDeviceCollectorAuthenticator implements Authenticator {
     /** Time from page load to FP completion in ms — bot detection signal. */
     public static final String NOTE_DEVICE_LOAD_MS        = "HUMIFORTIS_DEVICE_LOAD_MS";
 
-    // ── v2.2 passive discriminators ───────────────────────────────────────────
+    // ── v2.3 Math / FPU fingerprint ───────────────────────────────────────────
+
+    /** SHA-256 of stable-stringified Math results — FPU drift detection cross-session. */
+    public static final String NOTE_DEVICE_MATH_HASH        = "HUMIFORTIS_DEVICE_MATH_HASH";
+    /** Inferred FPU instruction set: "arm64" | "x86_64" | "unknown". Multi-signal classifier. */
+    public static final String NOTE_DEVICE_FPU_CLASS        = "HUMIFORTIS_DEVICE_FPU_CLASS";
+    /** "1" if Math results contain NaN/Infinity — headless or instrumented JS engine. */
+    public static final String NOTE_DEVICE_MATH_ANOMALY     = "HUMIFORTIS_DEVICE_MATH_ANOMALY";
+    /** Math.sin(1) execution time in µs (string, 3 dp) — VM jitter signal. Value IS µs. */
+    public static final String NOTE_DEVICE_MATH_EXEC_MS     = "HUMIFORTIS_DEVICE_MATH_EXEC_MS";
+    /** abs(sin²+cos²−1) deviation — detects patched/broken Math engines. Float string, 6 dp. */
+    public static final String NOTE_DEVICE_MATH_CONSISTENCY = "HUMIFORTIS_DEVICE_MATH_CONSISTENCY";
 
     /** Actual maxTouchPoints count: 0=desktop, 1=pen, 5=phone, 10=high-end tablet. */
     public static final String NOTE_DEVICE_TOUCH_POINTS  = "HUMIFORTIS_DEVICE_TOUCH_POINTS";
@@ -180,6 +191,12 @@ public class HumifortisDeviceCollectorAuthenticator implements Authenticator {
         String deviceTouchPoints = params.getFirst("device_touch_points");
         String deviceOrientation = params.getFirst("device_orientation");
         String deviceHashPerfMs  = params.getFirst("device_hash_perf_ms");
+        // ── MATH / FPU METRICS (v2.3)
+        String deviceMathHash        = params.getFirst("device_math_hash");
+        String deviceFpuClass        = params.getFirst("device_fpu_class");
+        String deviceMathAnomaly     = params.getFirst("device_math_anomaly");
+        String deviceMathExecMs      = params.getFirst("device_math_exec_ms");
+        String deviceMathConsistency = params.getFirst("device_math_consistency");
 
         // ── ANTI-REPLAY BINDING VALIDATION ───────────────────────────────────
         // Recompute binding server-side from the stored nonce + submitted timestamp + deviceId.
@@ -205,9 +222,14 @@ public class HumifortisDeviceCollectorAuthenticator implements Authenticator {
         setNote(context, NOTE_DEVICE_WEBGL_VENDOR,   deviceWebglVendor);
         setNote(context, NOTE_DEVICE_WEBGL_RENDERER, deviceWebglRenderer);
         setNote(context, NOTE_DEVICE_LOAD_MS,        deviceLoadMs);
-        setNote(context, NOTE_DEVICE_TOUCH_POINTS,   deviceTouchPoints);
-        setNote(context, NOTE_DEVICE_ORIENTATION,    deviceOrientation);
-        setNote(context, NOTE_DEVICE_HASH_PERF_MS,   deviceHashPerfMs);
+        setNote(context, NOTE_DEVICE_TOUCH_POINTS,       deviceTouchPoints);
+        setNote(context, NOTE_DEVICE_ORIENTATION,        deviceOrientation);
+        setNote(context, NOTE_DEVICE_HASH_PERF_MS,       deviceHashPerfMs);
+        setNote(context, NOTE_DEVICE_MATH_HASH,          deviceMathHash);
+        setNote(context, NOTE_DEVICE_FPU_CLASS,          deviceFpuClass);
+        setNote(context, NOTE_DEVICE_MATH_ANOMALY,       deviceMathAnomaly);
+        setNote(context, NOTE_DEVICE_MATH_EXEC_MS,       deviceMathExecMs);
+        setNote(context, NOTE_DEVICE_MATH_CONSISTENCY,   deviceMathConsistency);
         // Binding result is always set (even "absent") so downstream SPI can read it
         context.getAuthenticationSession().setAuthNote(NOTE_BINDING_RESULT, bindingResult);
 
@@ -228,9 +250,13 @@ public class HumifortisDeviceCollectorAuthenticator implements Authenticator {
             eventDetail(context, "device_webgl_vendor",   deviceWebglVendor);
             eventDetail(context, "device_webgl_renderer", deviceWebglRenderer);
             eventDetail(context, "device_load_ms",        deviceLoadMs);
-            eventDetail(context, "device_touch_points",   deviceTouchPoints);
-            eventDetail(context, "device_orientation",    deviceOrientation);
-            eventDetail(context, "device_hash_perf_ms",   deviceHashPerfMs);
+            eventDetail(context, "device_touch_points",      deviceTouchPoints);
+            eventDetail(context, "device_orientation",       deviceOrientation);
+            eventDetail(context, "device_hash_perf_ms",      deviceHashPerfMs);
+            eventDetail(context, "device_math_hash",         deviceMathHash);
+            eventDetail(context, "device_fpu_class",         deviceFpuClass);
+            eventDetail(context, "device_math_anomaly",      deviceMathAnomaly);
+            eventDetail(context, "device_math_consistency",  deviceMathConsistency);
         }
 
         logger.debugf("[DeviceCollector] collected — device_id=%s binding=%s platform=%s cpu=%s webgl=%s load_ms=%s",

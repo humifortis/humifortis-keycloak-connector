@@ -127,6 +127,16 @@ public class HumifortisRiskEvaluator {
     // =========================================================================
 
     public Risk evaluate(RealmModel realm, UserModel knownUser) {
+        return evaluate(realm, knownUser, null);
+    }
+
+    /**
+     * Evaluates the risk for a user in the given realm, passing the Keycloak auth session ID
+     * as flow_id so the credential-verified event is grouped with the enforcement events.
+     *
+     * @param flowId  Keycloak root auth session ID (code_id) — may be null for non-browser flows.
+     */
+    public Risk evaluate(RealmModel realm, UserModel knownUser, String flowId) {
         if (knownUser == null) {
             logger.warnf("[HumifortisRiskEvaluator] User is null — fail open");
             return failOpen();
@@ -157,9 +167,10 @@ public class HumifortisRiskEvaluator {
             // Build payload
             EventPayload event = new EventPayload();
             event.entity_id   = entityId;
-            event.entity_type = null; // leave empty so key = "{tenant}:risk::{entityId}" — consistent with API test injections
-            event.event_type  = "auth_login_success";
+            event.entity_type = "user"; // must match entity_type sent by HumifortisEventListener so /evaluate reads the same Redis risk key as /events
+            event.event_type  = "auth_credential_verified"; // credentials confirmed; session NOT yet established
             event.timestamp   = Instant.now().toString();
+            event.flow_id     = flowId; // propagate Keycloak auth session id — groups with enforcement events
             event.metadata    = buildMetadata(realm, knownUser);
 
             EvaluateRequestPayload payload = new EvaluateRequestPayload();
@@ -219,10 +230,23 @@ public class HumifortisRiskEvaluator {
     private Map<String, Object> buildMetadata(RealmModel realm, UserModel user) {
         Map<String, Object> meta = new HashMap<>();
 
-        // IP address — forwarded to server for GeoIP lookup
+        // IP address — real client IP after nginx real_ip_module resolves CF-Connecting-IP
         safeCollect(meta, "ip", () -> {
             var conn = session.getContext().getConnection();
             return conn != null ? conn.getRemoteAddr() : null;
+        });
+
+        // Cloudflare geo-country (free, instant, available when CF is the proxy).
+        // Sent as "geo_country" so the Go enricher skips MaxMind country lookup
+        // and uses MaxMind only for city + ASN (which CF free plan doesn't provide).
+        // Values: ISO 3166-1 alpha-2 (e.g. "CA"), "XX"=unknown, "T1"=Tor — we skip both.
+        safeCollect(meta, "geo_country", () -> {
+            var headers = session.getContext().getRequestHeaders();
+            if (headers == null) return null;
+            String cc = headers.getHeaderString("CF-IPCountry");
+            if (cc == null || cc.isBlank() || "XX".equals(cc) || "T1".equals(cc)) return null;
+            meta.put("geo_country_source", "cloudflare");
+            return cc;
         });
 
         // User-Agent (raw string) — server does browser/OS parsing
@@ -310,6 +334,22 @@ public class HumifortisRiskEvaluator {
             var as = session.getContext().getAuthenticationSession();
             return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_BINDING_RESULT) : null;
         });
+
+        // Browser trust token — HttpOnly cookie set after previous MFA success.
+        // Hashed server-side to SHA-256 hex before sending (plain value never leaves the browser).
+        // Enables browser_token_valid signal in the risk pipeline on subsequent logins.
+        safeCollect(meta, "trust_token_hash", () -> {
+            try {
+                var cookies = session.getContext().getHttpRequest().getHttpHeaders().getCookies();
+                if (cookies == null) return null;
+                jakarta.ws.rs.core.Cookie c = cookies.get("hf_trust");
+                if (c == null || c.getValue() == null || c.getValue().isBlank()) return null;
+                return sha256Hex(c.getValue());
+            } catch (Exception e) {
+                logger.debugf("[HumifortisRiskEvaluator] trust_token_hash read failed: %s", e.getMessage());
+                return null;
+            }
+        });
         // v2.2 passive discriminators
         safeCollect(meta, "device_touch_points", () -> {
             var as = session.getContext().getAuthenticationSession();
@@ -327,10 +367,48 @@ public class HumifortisRiskEvaluator {
             var as = session.getContext().getAuthenticationSession();
             return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_LOAD_MS) : null;
         });
+        // v2.3 Math / FPU fingerprint
+        safeCollect(meta, "device_math_hash", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_MATH_HASH) : null;
+        });
+        safeCollect(meta, "device_fpu_class", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_FPU_CLASS) : null;
+        });
+        safeCollect(meta, "device_math_anomaly", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_MATH_ANOMALY) : null;
+        });
+        safeCollect(meta, "device_math_exec_ms", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_MATH_EXEC_MS) : null;
+        });
+        safeCollect(meta, "device_math_consistency", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_MATH_CONSISTENCY) : null;
+        });
 
         // User attributes
         if (user.getUsername() != null) meta.put("username", user.getUsername());
         if (user.getEmail()    != null) meta.put("email",    user.getEmail());
+
+        // email_verified — required for EMAIL_OTP safety (unverified email is attackable)
+        meta.put("email_verified", String.valueOf(user.isEmailVerified()));
+
+        // mfa_methods — enrolled methods as comma-separated string for feature engine
+        // (distinct from available_methods which includes EMAIL_OTP derived from email_verified)
+        safeCollect(meta, "mfa_methods", () -> {
+            List<String> methods = new ArrayList<>();
+            user.credentialManager().getStoredCredentialsStream().forEach(c -> {
+                switch (c.getType()) {
+                    case "otp"                   -> methods.add("TOTP");
+                    case "webauthn"              -> methods.add("WEBAUTHN");
+                    case "webauthn-passwordless" -> methods.add("WEBAUTHN_PASSWORDLESS");
+                }
+            });
+            return methods.isEmpty() ? null : String.join(",", methods);
+        });
 
         safeCollect(meta, "account_age_days", () -> {
             if (user.getCreatedTimestamp() == null) return null;
@@ -450,7 +528,8 @@ public class HumifortisRiskEvaluator {
     // HELPERS
     // =========================================================================
 
-    private static String buildEntityId(RealmModel realm, UserModel user) {
+    // Package-private so HumifortisStepUpRouter can build entity IDs without duplication.
+    static String buildEntityId(RealmModel realm, UserModel user) {
         // Standard entity_id format: user:keycloak:{realmName}:{keycloakUserUUID}
         // This matches exactly what E2E tests use via ENV.USERS.alice.entityId and
         // what the risk engine stores risk state under — ensuring consistent Redis keys
@@ -465,6 +544,154 @@ public class HumifortisRiskEvaluator {
     public static String envOrDefault(String key, String defaultValue) {
         String val = System.getenv(key);
         return (val == null || val.isBlank()) ? defaultValue : val;
+    }
+
+    // ── SHA-256 hex helper ────────────────────────────────────────────────────
+    // Package-private: used by HumifortisStepUpRouter to hash the cookie value before
+    // sending to the server and before setting the cookie in the browser.
+    static String sha256Hex(String input) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : hash) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("SHA-256 failed", e);
+        }
+    }
+
+    // ── Browser token registration ────────────────────────────────────────────
+
+    /**
+     * Parses a User-Agent string into a human-readable device label.
+     * Pattern: "Desktop-Chrome-149, macOS 10.15"
+     */
+    static String parseDeviceName(String ua) {
+        if (ua == null || ua.isBlank()) return "Unknown Device";
+
+        // Device type
+        String deviceType = "Desktop";
+        if (ua.contains("Mobile") || ua.contains("Android") ||
+                ua.contains("iPhone") || ua.contains("iPad")) {
+            deviceType = "Mobile";
+        }
+
+        // Browser (order matters: Edge before Chrome)
+        String browser = "Browser";
+        String browserVer = "";
+        java.util.regex.Matcher m;
+        if ((m = java.util.regex.Pattern.compile("Edg/([0-9]+)").matcher(ua)).find()) {
+            browser = "Edge"; browserVer = m.group(1);
+        } else if ((m = java.util.regex.Pattern.compile("Firefox/([0-9]+)").matcher(ua)).find()) {
+            browser = "Firefox"; browserVer = m.group(1);
+        } else if ((m = java.util.regex.Pattern.compile("Chrome/([0-9]+)").matcher(ua)).find()) {
+            browser = "Chrome"; browserVer = m.group(1);
+        } else if (ua.contains("Version/") && ua.contains("Safari")) {
+            m = java.util.regex.Pattern.compile("Version/([0-9]+)").matcher(ua);
+            if (m.find()) browserVer = m.group(1);
+            browser = "Safari";
+        }
+
+        // OS / Platform
+        String os = "Unknown OS";
+        if ((m = java.util.regex.Pattern.compile("Windows NT ([0-9.]+)").matcher(ua)).find()) {
+            String v = m.group(1);
+            os = "Windows " + (v.startsWith("10") ? "10/11" : v);
+        } else if ((m = java.util.regex.Pattern.compile("Mac OS X ([0-9_]+)").matcher(ua)).find()) {
+            os = "macOS " + m.group(1).replace('_', '.');
+        } else if (ua.contains("Android")) {
+            m = java.util.regex.Pattern.compile("Android ([0-9.]+)").matcher(ua);
+            os = m.find() ? "Android " + m.group(1) : "Android";
+        } else if (ua.contains("iPhone") || ua.contains("iPad")) {
+            m = java.util.regex.Pattern.compile("OS ([0-9_]+)").matcher(ua);
+            os = m.find() ? "iOS " + m.group(1).replace('_', '.') : "iOS";
+        } else if (ua.contains("Linux")) {
+            os = "Linux";
+        }
+
+        String browserPart = browser + (browserVer.isEmpty() ? "" : "-" + browserVer);
+        return deviceType + "-" + browserPart + ", " + os;
+    }
+
+    /**
+     * Extracts the OS/platform family from a User-Agent string.
+     * Returns "macOS", "Windows", "Linux", "Android", "iOS", or "Unknown".
+     */
+    static String parsePlatform(String ua) {
+        if (ua == null || ua.isBlank()) return "Unknown";
+        if (ua.contains("Mac OS X"))  return "macOS";
+        if (ua.contains("Windows"))   return "Windows";
+        if (ua.contains("iPhone") || ua.contains("iPad")) return "iOS";
+        if (ua.contains("Android"))   return "Android";
+        if (ua.contains("Linux"))     return "Linux";
+        return "Unknown";
+    }
+
+    /**
+     * Registers a browser token hash with the server after successful MFA.
+     * Fire-and-forget (CompletableFuture) — never blocks the auth flow.
+     *
+     * @param canonicalEntityId  e.g. "user:keycloak:demo:uuid"
+     * @param tokenHash          SHA-256 hex of the HttpOnly cookie value
+     * @param tenantId           Humifortis tenant ID (from env var or realm name)
+     * @param deviceId           Stable FingerprintJS visitorId — when provided, ensures one
+     *                           trusted_devices row per physical device (token rotates on MFA).
+     *                           When null/empty, legacy behaviour: one row per token.
+     * @param deviceName         Human-readable label, e.g. "Desktop-Chrome-149, macOS 10.15"
+     * @param platform           OS family, e.g. "macOS"
+     * @param ipAddress          End-user IP at trust time
+     */
+    public void registerTrustTokenAsync(String canonicalEntityId, String tokenHash, String tenantId,
+                                        String deviceId, String deviceName, String platform, String ipAddress) {
+        String apiUrl = envOrDefault(ENV_API_URL, DEFAULT_API_URL);
+        String apiKey = System.getenv(ENV_API_KEY);
+        if (apiKey == null || apiKey.isBlank()) {
+            logger.warnf("[HumifortisRiskEvaluator] registerTrustToken: API key missing");
+            return;
+        }
+        java.util.function.Function<String,String> esc = s -> s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
+        String body = "{\"entity_id\":\"" + esc.apply(canonicalEntityId) +
+                      "\",\"token_hash\":\"" + tokenHash +
+                      "\",\"ttl_days\":30" +
+                      (deviceId != null && !deviceId.isBlank()
+                          ? ",\"device_id\":\"" + esc.apply(deviceId) + "\"" : "") +
+                      (deviceName != null && !deviceName.isBlank()
+                          ? ",\"device_name\":\"" + esc.apply(deviceName) + "\"" : "") +
+                      (platform != null && !platform.isBlank()
+                          ? ",\"platform\":\"" + esc.apply(platform) + "\"" : "") +
+                      (ipAddress != null && !ipAddress.isBlank()
+                          ? ",\"ip_address\":\"" + esc.apply(ipAddress) + "\"" : "") +
+                      "}";
+        String url = apiUrl + "/devices/trust";
+
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("Content-Type", "application/json")
+                    .header("X-API-Key",    apiKey)
+                    .header("X-Tenant-ID",  tenantId)
+                    .timeout(Duration.ofMillis(DEFAULT_TIMEOUT_MS))
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                    if (resp.statusCode() == 201) {
+                        logger.infof("[HumifortisRiskEvaluator] Browser token registered for entity=%s",
+                                canonicalEntityId);
+                    } else {
+                        logger.warnf("[HumifortisRiskEvaluator] registerTrustToken HTTP %d: %s",
+                                resp.statusCode(), resp.body());
+                    }
+                } catch (Exception e) {
+                    logger.warnf("[HumifortisRiskEvaluator] registerTrustToken async failed: %s",
+                            e.getMessage());
+                }
+            });
+        } catch (Exception e) {
+            logger.warnf("[HumifortisRiskEvaluator] registerTrustToken setup failed: %s", e.getMessage());
+        }
     }
 
     private static int parseTimeout(String raw) {
@@ -486,6 +713,7 @@ public class HumifortisRiskEvaluator {
         public String              entity_type;
         public String              event_type;
         public String              timestamp;
+        public String              flow_id;   // Keycloak auth session id — groups all events of one login attempt
         public Map<String, Object> metadata;
     }
 
@@ -514,6 +742,17 @@ public class HumifortisRiskEvaluator {
         @SerializedName("geo_city")             public String       geo_city;
         /** Enforcement mode: enforce | dry_run | shadow */
         @SerializedName("mode")                 public String       mode;
+        // ─── Verified-Unblock (admin-initiated step-up) ──────────────────────
+        /**
+         * Set to REQUIRE_MFA_VERIFICATION when a DENY was downgraded to a step-up MFA
+         * because an admin opened a verification window. Distinct from a normal
+         * risk-based MFA — the connector binds the resulting MFA to the challenge.
+         */
+        @SerializedName("verification_reason")          public String verification_reason;
+        /** Challenge id to echo back in auth_mfa_success so the server can bind + clear the block. */
+        @SerializedName("verification_challenge_id")    public String verification_challenge_id;
+        /** Minimum AAL required to satisfy the challenge (AAL2 default, AAL3 for WebAuthn). */
+        @SerializedName("verification_required_level")  public String verification_required_level;
     }
 }
 

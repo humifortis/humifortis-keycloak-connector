@@ -38,6 +38,19 @@
                 </div>
             </div>
 
+            <div class="${properties.kcFormGroupClass!}" style="margin-top:12px;">
+                <div class="${properties.kcInputWrapperClass!}" style="display:flex;align-items:center;gap:8px;">
+                    <input id="trust_device" name="trust_device" type="checkbox" value="on"
+                           style="width:16px;height:16px;cursor:pointer;accent-color:#0056b3;"/>
+                    <label for="trust_device" style="margin:0;cursor:pointer;font-size:0.875rem;color:#555;">
+                        ${msg("trustDeviceLabel","Trust this device for 30 days")}
+                    </label>
+                </div>
+                <p style="margin:4px 0 0 24px;font-size:0.78rem;color:#888;">
+                    ${msg("trustDeviceHint","Don't check this on shared or public computers.")}
+                </p>
+            </div>
+
             <#if expirySeconds??>
                 <p class="text-muted small text-center">
                     ${msg("codeExpiresIn","Code expires in")} <strong id="hf-countdown">${expirySeconds}</strong>s

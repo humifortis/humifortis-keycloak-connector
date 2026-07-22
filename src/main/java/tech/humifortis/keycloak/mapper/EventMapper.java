@@ -2,6 +2,7 @@ package tech.humifortis.keycloak.mapper;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.UUID;
 
 import org.keycloak.events.Event;
 import org.keycloak.events.EventType;
@@ -29,10 +30,19 @@ public class EventMapper {
         humiEvent.setTimestamp(Instant.ofEpochMilli(event.getTime()).toString());
         humiEvent.setEventType(mapEventType(event.getType()));
         humiEvent.setSource("keycloak");
+        // Propagate Keycloak's native event UUID — used by core for idempotent deduplication.
+        if (event.getId() != null) {
+            humiEvent.setEventId(event.getId());
+        }
 
         addCommonMetadata(humiEvent, realmId, event.getClientId(),
                 event.getIpAddress(), event.getSessionId(), event.getError());
         addContextMetadata(humiEvent, event.getDetails());
+
+        // flow_id — mandatory for auth events (groups all events of one authentication attempt).
+        // Priority: authSessionId → code_id (OIDC) → sessionId (post-auth fallback)
+        String flowId = extractFlowId(event.getDetails(), event.getSessionId());
+        humiEvent.setFlowId(flowId);
 
         return humiEvent;
     }
@@ -64,6 +74,11 @@ public class EventMapper {
 
         humiEvent.setEventType(mapAdminEventType(resourceType, op, resourcePath));
 
+        // Propagate Keycloak's native admin event UUID.
+        if (adminEvent.getId() != null) {
+            humiEvent.setEventId(adminEvent.getId());
+        }
+
         // resource block: what was touched
         humiEvent.addResource("resource_type", resourceType);
         humiEvent.addResource("operation",     op != null ? op.name() : "UNKNOWN");
@@ -90,6 +105,68 @@ public class EventMapper {
     // Feedback event → HumifortisEvent
     // Same data model contract as all other events.
     // ----------------------------------------------------------------
+
+    /**
+     * Synthetic auth_mfa_success event derived from a LOGIN event where MFA was enforced.
+     *
+     * <p>Emitted BEFORE auth_login_success so the MFA score delta (−15) is applied first.
+     * auth_login_success has delta=0, so order is score-safe regardless.
+     *
+     * <p>The event_id is a stable UUID v3 derived from the login event ID so retries
+     * never produce duplicates in humifortis-core.
+     *
+     * @param loginEvent the Keycloak LOGIN event that concluded the MFA flow
+     * @param challengeId optional Verified-Unblock challenge id to bind this MFA to
+     *                    (null/blank for a normal risk-based MFA)
+     */
+    public HumifortisEvent fromMfaSuccess(Event loginEvent, String challengeId) {
+        HumifortisEvent e = new HumifortisEvent();
+
+        String realmId = loginEvent.getRealmId() != null ? loginEvent.getRealmId() : "unknown";
+        String userId  = loginEvent.getUserId() != null
+                ? loginEvent.getUserId()
+                : detailOrFallback(loginEvent.getDetails(), "userId", "anonymous");
+
+        e.setEntityId(String.format("user:keycloak:%s:%s", realmId, userId));
+        e.setEntityType("user");
+        e.setTimestamp(Instant.ofEpochMilli(loginEvent.getTime()).toString());
+        e.setEventType("auth_mfa_success");
+        e.setSource("keycloak-rba");
+
+        // Stable deterministic UUID — same login event always yields the same mfa_success ID.
+        if (loginEvent.getId() != null) {
+            e.setEventId(UUID.nameUUIDFromBytes(
+                    (loginEvent.getId() + ":auth_mfa_success").getBytes()
+            ).toString());
+        }
+
+        // flow_id — must match the login event so both events stay in the same flow group.
+        String flowId = extractFlowId(loginEvent.getDetails(), loginEvent.getSessionId());
+        e.setFlowId(flowId);
+
+        addCommonMetadata(e, realmId, loginEvent.getClientId(),
+                loginEvent.getIpAddress(), loginEvent.getSessionId(), null);
+        addContextMetadata(e, loginEvent.getDetails());
+
+        // Verified-Unblock binding: echo the challenge id + a fresh MFA timestamp so
+        // humifortis-core can (a) match challenge_id and (b) verify mfa_ts > challenge_created_at
+        // before clearing the block. Both are required for a challenge-bound unblock.
+        String mfaTimestamp = Instant.ofEpochMilli(loginEvent.getTime()).toString();
+        e.addMetadata("mfa_timestamp", mfaTimestamp);
+        if (challengeId != null && !challengeId.isBlank()) {
+            e.addMetadata("challenge_id", challengeId);
+        }
+
+        return e;
+    }
+
+    /** Backward-compatible overload — normal risk-based MFA with no challenge binding. */
+    public HumifortisEvent fromMfaSuccess(Event loginEvent) {
+        return fromMfaSuccess(loginEvent, null);
+    }
+
+    // ----------------------------------------------------------------
+    // Feedback event → HumifortisEvent
 
     public HumifortisEvent fromFeedback(
             Event originEvent,
@@ -119,10 +196,23 @@ public class EventMapper {
                 Instant.ofEpochMilli(originEvent.getTime()).toString());
         humiEvent.setEventType(feedbackEventType);
         humiEvent.setSource("keycloak-rba");
+        // Feedback events are synthetic (created by the connector, not directly by Keycloak),
+        // so we derive a stable UUID v3 from the origin event ID + feedback type.
+        // Same input → same UUID → safe to retry without double-processing.
+        if (originEvent.getId() != null) {
+            String feedbackId = UUID.nameUUIDFromBytes(
+                (originEvent.getId() + ":" + feedbackEventType).getBytes()
+            ).toString();
+            humiEvent.setEventId(feedbackId);
+        }
 
         addCommonMetadata(humiEvent, realmId, originEvent.getClientId(),
                 originEvent.getIpAddress(), originEvent.getSessionId(), null);
         addContextMetadata(humiEvent, originEvent.getDetails());
+
+        // flow_id — propagate from origin event so feedback stays in the same flow group
+        String flowId = extractFlowId(originEvent.getDetails(), originEvent.getSessionId());
+        humiEvent.setFlowId(flowId);
 
         // Risk decision context
         humiEvent.addMetadata("risk_score",  riskScore);
@@ -281,6 +371,12 @@ public class EventMapper {
         // Account age — critical for new_account_new_device scoring
         putIfPresent(humiEvent, details, "account_age_days");
 
+        // Email verification — required for EMAIL_OTP safety (unverified email is attackable)
+        putIfPresent(humiEvent, details, "email_verified");
+
+        // MFA methods — enrolled methods comma-separated (TOTP, WEBAUTHN, WEBAUTHN_PASSWORDLESS)
+        putIfPresent(humiEvent, details, "mfa_methods");
+
         // Privilege context — critical for off_hours_privileged detection
         putIfPresent(humiEvent, details, "is_privileged");
 
@@ -295,6 +391,28 @@ public class EventMapper {
 
         // Identity provider — federated vs local login context
         putIfPresent(humiEvent, details, "identity_provider");
+
+        // FP hash — SHA-256 of full FP components JSON, cross-login drift detection
+        putIfPresent(humiEvent, details, "device_fp_hash");
+
+        // Anti-replay binding result: valid | stale | mismatch | absent | error (server-validated)
+        putIfPresent(humiEvent, details, "device_binding_result");
+
+        // GPU — hard to spoof, strong device class signal (T2/T3)
+        putIfPresent(humiEvent, details, "device_webgl_vendor");
+        putIfPresent(humiEvent, details, "device_webgl_renderer");
+
+        // v2.2 passive discriminators
+        putIfPresent(humiEvent, details, "device_touch_points");
+        putIfPresent(humiEvent, details, "device_orientation");
+        putIfPresent(humiEvent, details, "device_hash_perf_ms");
+
+        // v2.3 Math/FPU fingerprint — anti-VM, anti-spoof signals
+        putIfPresent(humiEvent, details, "device_math_hash");
+        putIfPresent(humiEvent, details, "device_fpu_class");
+        putIfPresent(humiEvent, details, "device_math_anomaly");
+        putIfPresent(humiEvent, details, "device_math_exec_ms");
+        putIfPresent(humiEvent, details, "device_math_consistency");
     }
 
     private void putIfPresent(
@@ -314,5 +432,27 @@ public class EventMapper {
         if (details == null) return fallback;
         String value = details.get(key);
         return (value != null && !value.isBlank()) ? value : fallback;
+    }
+
+    /**
+     * Extracts the flow_id that groups all events of one authentication attempt.
+     *
+     * Priority order (most stable first):
+     *   1. authSessionId  — Keycloak auth session, present during the full auth flow
+     *   2. code_id        — OIDC authorization code flows (same session, different key)
+     *   3. sessionId      — post-auth fallback (session already established)
+     *
+     * Returns null only when all sources are missing (admin events, synthetic events).
+     */
+    private String extractFlowId(Map<String, String> details, String sessionId) {
+        if (details != null) {
+            String authSessionId = details.get("authSessionId");
+            if (authSessionId != null && !authSessionId.isBlank()) return authSessionId;
+
+            String codeId = details.get("code_id");
+            if (codeId != null && !codeId.isBlank()) return codeId;
+        }
+        if (sessionId != null && !sessionId.isBlank()) return sessionId;
+        return null;
     }
 }

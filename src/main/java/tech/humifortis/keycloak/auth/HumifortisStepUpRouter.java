@@ -442,6 +442,24 @@ public class HumifortisStepUpRouter implements Authenticator {
         invalidateOtp(context);
         rl.clearFailures(userId);
         HumifortisAuditLog.log("mfa_success", userId, "EMAIL_OTP", "verified", "", correlationId, "");
+
+        // ── DEVICE BINDING — issue HttpOnly browser-trust cookie ─────────────
+        // Only bind when the user explicitly checked "Trust this device for 30 days".
+        // Auto-binding on every MFA success would be a security risk on shared/public machines.
+        String trustDeviceParam = context.getHttpRequest()
+                .getDecodedFormParameters().getFirst("trust_device");
+        boolean userWantsTrust = "on".equalsIgnoreCase(trustDeviceParam)
+                              || "true".equalsIgnoreCase(trustDeviceParam);
+
+        if (userWantsTrust) {
+            logger.infof("[StepUpRouter] User requested device trust for user=%s",
+                    context.getUser().getUsername());
+            bindBrowserToken(context);
+        } else {
+            logger.debugf("[StepUpRouter] Device trust not requested by user=%s",
+                    context.getUser().getUsername());
+        }
+
         context.success();
     }
 
@@ -576,6 +594,117 @@ public class HumifortisStepUpRouter implements Authenticator {
     private void invalidateOtp(AuthenticationFlowContext context) {
         context.getAuthenticationSession().setAuthNote(NOTE_EMAIL_OTP_HASH,   "USED");
         context.getAuthenticationSession().setAuthNote(NOTE_EMAIL_OTP_EXPIRY, "0");
+    }
+
+    // =========================================================================
+    // BROWSER TOKEN BINDING — issued after successful MFA
+    // =========================================================================
+
+    /**
+     * Generates a cryptographically random browser trust token, sets it as an
+     * HttpOnly cookie ("hf_trust"), and registers SHA-256(token) with the server.
+     *
+     * <p>Design:
+     * <ul>
+     *   <li>Plain token stays in browser cookie — never sent to server.</li>
+     *   <li>Server stores only SHA-256(token) in trusted_devices table.</li>
+     *   <li>On next login, the connector reads the cookie, re-hashes it, and sends
+     *       it as {@code trust_token_hash} in the /evaluate metadata.</li>
+     *   <li>Processor checks trusted_devices → sets {@code browser_token_valid = true}.</li>
+     * </ul>
+     *
+     * <p>Failure is non-blocking — a missing cookie just means higher risk on the
+     * next login (REQUIRE_MFA again), which is the correct fail-secure behaviour.
+     */
+    private void bindBrowserToken(AuthenticationFlowContext context) {
+        try {
+            // Generate 32 cryptographically random bytes → 64-char hex token
+            byte[] raw = new byte[32];
+            new SecureRandom().nextBytes(raw);
+            StringBuilder sbToken = new StringBuilder(64);
+            for (byte b : raw) sbToken.append(String.format("%02x", b));
+            String tokenValue = sbToken.toString();
+            String tokenHash  = HumifortisRiskEvaluator.sha256Hex(tokenValue);
+
+            // ── Set HttpOnly cookie ───────────────────────────────────────────
+            // Keycloak 26.x (Quarkus/RESTEasy) exposes org.keycloak.http.HttpResponse
+            // which supports addHeader() but not a type-safe addCookie() variant.
+            // We build the Set-Cookie header string directly — fully portable.
+            String cookiePath = "/realms/" + context.getRealm().getName();
+            int    maxAgeSec  = 30 * 24 * 3600; // 30 days
+            String setCookieValue = "hf_trust=" + tokenValue
+                    + "; Path=" + cookiePath
+                    + "; Max-Age=" + maxAgeSec
+                    + "; HttpOnly"
+                    + "; SameSite=Strict";
+            // Note: Secure flag is omitted intentionally for dev (HTTP localhost).
+            // In production behind HTTPS it will be added automatically by the reverse proxy,
+            // or set HUMIFORTIS_COOKIE_SECURE=true env var to enable it.
+            if ("true".equalsIgnoreCase(System.getenv("HUMIFORTIS_COOKIE_SECURE"))) {
+                setCookieValue += "; Secure";
+            }
+            try {
+                context.getSession().getContext().getHttpResponse()
+                        .addHeader("Set-Cookie", setCookieValue);
+                logger.infof("[StepUpRouter] hf_trust cookie set for user=%s path=%s",
+                        context.getUser().getUsername(), cookiePath);
+            } catch (Exception cookieEx) {
+                logger.warnf("[StepUpRouter] hf_trust cookie set failed (non-blocking): %s",
+                        cookieEx.getMessage());
+            }
+
+            // ── Register token hash with server (async, non-blocking) ─────────
+            try {
+                HumifortisRiskEvaluator evaluator = new HumifortisRiskEvaluator(context.getSession());
+                String entityId = HumifortisRiskEvaluator.buildEntityId(
+                        context.getRealm(), context.getUser());
+                String tenantId = HumifortisRiskEvaluator.envOrDefault(
+                        HumifortisRiskEvaluator.ENV_TENANT_ID, context.getRealm().getName());
+
+                // Enrich registration with device info
+                String userAgent = null;
+                try {
+                    userAgent = context.getSession().getContext()
+                            .getHttpRequest().getHttpHeaders()
+                            .getHeaderString("User-Agent");
+                } catch (Exception ignored) {}
+
+                String ipAddress = null;
+                try {
+                    var conn = context.getSession().getContext().getConnection();
+                    ipAddress = conn != null ? conn.getRemoteAddr() : null;
+                } catch (Exception ignored) {}
+
+                // Prefer device_platform from auth note (already parsed by device collector)
+                String platform = null;
+                String deviceId = null;
+                try {
+                    var as = context.getAuthenticationSession();
+                    if (as != null) {
+                        platform = as.getAuthNote(
+                                HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_PLATFORM);
+                        // Stable FingerprintJS visitorId — ensures one row per physical device
+                        deviceId = as.getAuthNote(
+                                HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_ID);
+                    }
+                } catch (Exception ignored) {}
+                if (platform == null || platform.isBlank()) {
+                    platform = HumifortisRiskEvaluator.parsePlatform(userAgent);
+                }
+
+                String deviceName = HumifortisRiskEvaluator.parseDeviceName(userAgent);
+
+                evaluator.registerTrustTokenAsync(entityId, tokenHash, tenantId,
+                        deviceId, deviceName, platform, ipAddress);
+            } catch (Exception regEx) {
+                logger.warnf("[StepUpRouter] registerTrustToken failed (non-blocking): %s",
+                        regEx.getMessage());
+            }
+
+        } catch (Exception e) {
+            logger.warnf("[StepUpRouter] bindBrowserToken unexpected error (non-blocking): %s",
+                    e.getMessage());
+        }
     }
 
     String generateOtp() {
