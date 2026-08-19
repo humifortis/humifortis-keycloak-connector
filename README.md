@@ -75,6 +75,21 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
 
 **Done!** All configuration is now managed in the SaaS dashboard.
 
+## 🐳 Docker
+
+A `Dockerfile` in this repo builds a `humifortis` image — Keycloak with the
+connector already installed and compiled in:
+
+```bash
+docker build -t humifortis .
+docker run -p 8080:8080 \
+  -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin \
+  -e HUMIFORTIS_API_KEY=humi_kc_prod_xxx \
+  humifortis start-dev
+```
+
+See [DOCKER.md](DOCKER.md) for build args, Compose usage, and production notes.
+
 ## 📋 Configuration
 
 ### Environment Variables
