@@ -1,0 +1,15 @@
+services:
+  keycloak:
+    build: .
+    image: humifortis:local
+    command: ["start-dev"]
+    ports:
+      - "8080:8080"
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      # Required — get this from Connectors → Add Connector in the Humifortis SaaS dashboard
+      HUMIFORTIS_API_KEY: ${HUMIFORTIS_API_KEY:?set HUMIFORTIS_API_KEY in your environment or a .env file}
+      HUMIFORTIS_API_URL: ${HUMIFORTIS_API_URL:-https://api.humifortis.educosmic.tech}
+      HUMIFORTIS_TIMEOUT_MS: ${HUMIFORTIS_TIMEOUT_MS:-5000}
+      HUMIFORTIS_FALLBACK_ALLOW: ${HUMIFORTIS_FALLBACK_ALLOW:-true}

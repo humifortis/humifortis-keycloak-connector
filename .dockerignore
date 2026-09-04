@@ -1,0 +1,4 @@
+.git
+.github
+target/
+device-collector-ui/node_modules/
