@@ -6,16 +6,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 
 import org.jboss.logging.Logger;
 
@@ -43,24 +37,7 @@ public class SaasClient {
         this.gson = new GsonBuilder()
                 .setDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
                 .create();
-
-        try {
-            TrustManager[] trustAll = new TrustManager[]{
-                new X509TrustManager() {
-                    @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-                    @Override public void checkClientTrusted(X509Certificate[] c, String a) {}
-                    @Override public void checkServerTrusted(X509Certificate[] c, String a) {}
-                }
-            };
-            SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, trustAll, new SecureRandom());
-            this.httpClient = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofMillis(timeoutMs))
-                    .sslContext(sslContext)
-                    .build();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create SSL context", e);
-        }
+        this.httpClient = HttpClientFactory.create(timeoutMs, config.isInsecureSsl());
     }
 
     /**

@@ -4,8 +4,6 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -14,11 +12,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
-
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 
 import org.jboss.logging.Logger;
 import org.keycloak.models.KeycloakSession;
@@ -29,7 +22,10 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.annotations.SerializedName;
 
+import tech.humifortis.keycloak.client.HttpClientFactory;
 import tech.humifortis.keycloak.model.Risk;
+import tech.humifortis.keycloak.user.UserContextExtractor;
+import tech.humifortis.keycloak.user.UserContextSnapshot;
 
 /**
  * Calls POST /api/v1/evaluate on Humifortis Core with the full authentication context.
@@ -38,7 +34,7 @@ import tech.humifortis.keycloak.model.Risk;
  * The server does ALL enrichment (GeoIP, UA parsing, device fingerprint, risk scoring,
  * playbook evaluation). This keeps the connector thin and the logic centralized.</p>
  *
- * <p>The server's playbook decision is stored in {@link #LAST_DECISION} (ThreadLocal)
+ * <p>The server's playbook decision is returned explicitly with the mapped risk result
  * so {@link HumifortisRiskAuthenticator} can enforce it without re-calling the API.</p>
  *
  * <h3>Circuit breaker</h3>
@@ -73,53 +69,19 @@ public class HumifortisRiskEvaluator {
     private static final int  CIRCUIT_OPEN_THRESHOLD   = 3;
     private static final long CIRCUIT_OPEN_DURATION_MS = 10_000;
 
-    // ── Shared insecure HttpClient (created once via double-checked locking) ─
-    private static volatile HttpClient INSECURE_CLIENT;
-    private static final Object INSECURE_LOCK = new Object();
-
-    /** Thread-local that carries the latest server decision to the authenticator. */
-    public static final ThreadLocal<EvaluateResponse> LAST_DECISION = new ThreadLocal<>();
-
-    private final HttpClient      httpClient;
-    private final KeycloakSession session;
-    private final Gson            gson;
+    private final HttpClient          httpClient;
+    private final KeycloakSession     session;
+    private final Gson                gson;
+    private final UserContextExtractor userContextExtractor;
 
     public HumifortisRiskEvaluator(KeycloakSession session) {
         this.session = session;
         this.gson    = new GsonBuilder().create();
-
-        if ("true".equalsIgnoreCase(System.getenv("INSECURE_SSL"))) {
-            if (INSECURE_CLIENT == null) {
-                synchronized (INSECURE_LOCK) {
-                    if (INSECURE_CLIENT == null) INSECURE_CLIENT = buildInsecureClient();
-                }
-            }
-            this.httpClient = INSECURE_CLIENT;
-        } else {
-            this.httpClient = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofMillis(DEFAULT_TIMEOUT_MS))
-                    .build();
-        }
-    }
-
-    private static HttpClient buildInsecureClient() {
-        try {
-            TrustManager[] trustAll = {
-                new X509TrustManager() {
-                    public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-                    public void checkClientTrusted(X509Certificate[] c, String a) {}
-                    public void checkServerTrusted(X509Certificate[] c, String a) {}
-                }
-            };
-            SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, trustAll, new SecureRandom());
-            return HttpClient.newBuilder()
-                    .sslContext(ctx)
-                    .connectTimeout(Duration.ofMillis(DEFAULT_TIMEOUT_MS))
-                    .build();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create insecure SSL HttpClient", e);
-        }
+        this.userContextExtractor = new UserContextExtractor();
+        this.httpClient = HttpClientFactory.create(
+                DEFAULT_TIMEOUT_MS,
+                HttpClientFactory.isInsecureSslEnabled(System.getenv("INSECURE_SSL"))
+        );
     }
 
     // =========================================================================
@@ -137,13 +99,17 @@ public class HumifortisRiskEvaluator {
      * @param flowId  Keycloak root auth session ID (code_id) — may be null for non-browser flows.
      */
     public Risk evaluate(RealmModel realm, UserModel knownUser, String flowId) {
+        return evaluateDetailed(realm, knownUser, flowId).risk();
+    }
+
+    public EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId) {
         if (knownUser == null) {
             logger.warnf("[HumifortisRiskEvaluator] User is null — fail open");
-            return failOpen();
+            return new EvaluationResult(failOpen(), null);
         }
         if (isCircuitOpen()) {
             logger.debugf("[HumifortisRiskEvaluator] Circuit OPEN — fail open");
-            return failOpen();
+            return new EvaluationResult(failOpen(), null);
         }
 
         String apiUrl   = envOrDefault(ENV_API_URL, DEFAULT_API_URL);
@@ -154,13 +120,13 @@ public class HumifortisRiskEvaluator {
 
         if (apiKey == null || apiKey.isBlank()) {
             logger.warnf("[HumifortisRiskEvaluator] API key missing (entity=%s) — fail open", entityId);
-            return failOpen();
+            return new EvaluationResult(failOpen(), null);
         }
 
-        boolean insecureSsl = "true".equalsIgnoreCase(System.getenv("INSECURE_SSL"));
+        boolean insecureSsl = HttpClientFactory.isInsecureSslEnabled(System.getenv("INSECURE_SSL"));
         if (!apiUrl.toLowerCase(Locale.ROOT).startsWith("https://") && !insecureSsl) {
             logger.warnf("[HumifortisRiskEvaluator] Non-HTTPS URL (entity=%s) — fail open", entityId);
-            return failOpen();
+            return new EvaluationResult(failOpen(), null);
         }
 
         try {
@@ -200,11 +166,10 @@ public class HumifortisRiskEvaluator {
                 logger.warnf("[HumifortisRiskEvaluator] HTTP error %d (entity=%s) — fail open",
                         status, entityId);
                 recordFailure();
-                return failOpen();
+                return new EvaluationResult(failOpen(), null);
             }
 
             EvaluateResponse decision = gson.fromJson(response.body(), EvaluateResponse.class);
-            LAST_DECISION.set(decision);
             recordSuccess();
 
             String riskLevel = decision.risk_level != null ? decision.risk_level : "MINIMAL";
@@ -213,13 +178,13 @@ public class HumifortisRiskEvaluator {
             logger.debugf("[HumifortisRiskEvaluator] level=%s action=%s rule=%s score=%.1f",
                     riskLevel, decision.action, decision.playbook_rule, decision.risk_score);
 
-            return mapRiskLevel(riskLevel, reason);
+            return new EvaluationResult(mapRiskLevel(riskLevel, reason), decision);
 
         } catch (Exception e) {
             logger.warnf("[HumifortisRiskEvaluator] Exception (entity=%s): %s",
                     entityId, e.getMessage());
             recordFailure();
-            return failOpen();
+            return new EvaluationResult(failOpen(), null);
         }
     }
 
@@ -229,6 +194,7 @@ public class HumifortisRiskEvaluator {
 
     private Map<String, Object> buildMetadata(RealmModel realm, UserModel user) {
         Map<String, Object> meta = new HashMap<>();
+        UserContextSnapshot userContext = userContextExtractor.extract(session, realm, user);
 
         // IP address — real client IP after nginx real_ip_module resolves CF-Connecting-IP
         safeCollect(meta, "ip", () -> {
@@ -390,51 +356,26 @@ public class HumifortisRiskEvaluator {
         });
 
         // User attributes
-        if (user.getUsername() != null) meta.put("username", user.getUsername());
-        if (user.getEmail()    != null) meta.put("email",    user.getEmail());
+        if (userContext.username() != null) meta.put("username", userContext.username());
+        if (userContext.email()    != null) meta.put("email",    userContext.email());
 
         // email_verified — required for EMAIL_OTP safety (unverified email is attackable)
-        meta.put("email_verified", String.valueOf(user.isEmailVerified()));
+        meta.put("email_verified", String.valueOf(userContext.emailVerified()));
 
         // mfa_methods — enrolled methods as comma-separated string for feature engine
         // (distinct from available_methods which includes EMAIL_OTP derived from email_verified)
-        safeCollect(meta, "mfa_methods", () -> {
-            List<String> methods = new ArrayList<>();
-            user.credentialManager().getStoredCredentialsStream().forEach(c -> {
-                switch (c.getType()) {
-                    case "otp"                   -> methods.add("TOTP");
-                    case "webauthn"              -> methods.add("WEBAUTHN");
-                    case "webauthn-passwordless" -> methods.add("WEBAUTHN_PASSWORDLESS");
-                }
-            });
-            return methods.isEmpty() ? null : String.join(",", methods);
-        });
-
-        safeCollect(meta, "account_age_days", () -> {
-            if (user.getCreatedTimestamp() == null) return null;
-            return String.valueOf(ChronoUnit.DAYS.between(
-                    Instant.ofEpochMilli(user.getCreatedTimestamp()), Instant.now()));
-        });
-
-        safeCollect(meta, "user_roles", () -> {
-            List<String> roles = user.getRoleMappingsStream()
-                    .map(r -> r.getName()).toList();
-            if (roles.isEmpty()) return null;
-            meta.put("is_privileged",
-                    String.valueOf(roles.stream().anyMatch(this::isPrivilegedRole)));
-            return String.join(",", roles);
-        });
-
-        safeCollect(meta, "mfa_enrolled", () -> {
-            boolean hasMfa = user.credentialManager().getStoredCredentialsStream()
-                    .anyMatch(c -> "otp".equals(c.getType())
-                            || "webauthn".equals(c.getType())
-                            || "webauthn-passwordless".equals(c.getType()));
-            return String.valueOf(hasMfa);
-        });
-
-        safeCollect(meta, "active_session_count", () ->
-                String.valueOf(session.sessions().getUserSessionsStream(realm, user).count()));
+        if (!userContext.mfaMethods().isEmpty()) {
+            meta.put("mfa_methods", String.join(",", userContext.mfaMethods()));
+        }
+        if (userContext.accountAgeDays() != null) {
+            meta.put("account_age_days", String.valueOf(userContext.accountAgeDays()));
+        }
+        if (!userContext.roleNames().isEmpty()) {
+            meta.put("user_roles", String.join(",", userContext.roleNames()));
+            meta.put("is_privileged", String.valueOf(userContext.privileged()));
+        }
+        meta.put("mfa_enrolled", String.valueOf(userContext.mfaEnrolled()));
+        meta.put("active_session_count", String.valueOf(userContext.activeSessionCount()));
 
         meta.put("realm", realm.getName());
         return meta;
@@ -452,28 +393,14 @@ public class HumifortisRiskEvaluator {
     }
 
     private List<String> detectAvailableMethods(UserModel user) {
-        List<String> methods = new ArrayList<>();
         try {
-            user.credentialManager().getStoredCredentialsStream().forEach(cred -> {
-                switch (cred.getType()) {
-                    case "otp"                   -> methods.add("TOTP");
-                    case "webauthn"              -> methods.add("WEBAUTHN");
-                    case "webauthn-passwordless" -> methods.add("WEBAUTHN_PASSWORDLESS");
-                }
-            });
+            List<String> methods = new ArrayList<>(userContextExtractor.extractMfaMethods(user));
+            if (methods.isEmpty()) methods.add("EMAIL_OTP");
+            return methods;
         } catch (Exception e) {
             logger.debugf("[HumifortisRiskEvaluator] MFA methods detection failed: %s", e.getMessage());
+            return List.of("EMAIL_OTP");
         }
-        if (methods.isEmpty()) methods.add("EMAIL_OTP");
-        return methods;
-    }
-
-    private boolean isPrivilegedRole(String name) {
-        return name != null && Set.of(
-                "admin", "realm-admin", "manage-users", "manage-realm",
-                "manage-clients", "manage-identity-providers", "impersonation",
-                "create-realm", "manage-authorization"
-        ).contains(name);
     }
 
     // =========================================================================
@@ -650,19 +577,15 @@ public class HumifortisRiskEvaluator {
             logger.warnf("[HumifortisRiskEvaluator] registerTrustToken: API key missing");
             return;
         }
-        java.util.function.Function<String,String> esc = s -> s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
-        String body = "{\"entity_id\":\"" + esc.apply(canonicalEntityId) +
-                      "\",\"token_hash\":\"" + tokenHash +
-                      "\",\"ttl_days\":30" +
-                      (deviceId != null && !deviceId.isBlank()
-                          ? ",\"device_id\":\"" + esc.apply(deviceId) + "\"" : "") +
-                      (deviceName != null && !deviceName.isBlank()
-                          ? ",\"device_name\":\"" + esc.apply(deviceName) + "\"" : "") +
-                      (platform != null && !platform.isBlank()
-                          ? ",\"platform\":\"" + esc.apply(platform) + "\"" : "") +
-                      (ipAddress != null && !ipAddress.isBlank()
-                          ? ",\"ip_address\":\"" + esc.apply(ipAddress) + "\"" : "") +
-                      "}";
+        TrustTokenPayload payload = new TrustTokenPayload();
+        payload.entity_id = canonicalEntityId;
+        payload.token_hash = tokenHash;
+        payload.ttl_days = 30;
+        payload.device_id = isBlank(deviceId) ? null : deviceId;
+        payload.device_name = isBlank(deviceName) ? null : deviceName;
+        payload.platform = isBlank(platform) ? null : platform;
+        payload.ip_address = isBlank(ipAddress) ? null : ipAddress;
+        String body = gson.toJson(payload);
         String url = apiUrl + "/devices/trust";
 
         try {
@@ -697,6 +620,10 @@ public class HumifortisRiskEvaluator {
     private static int parseTimeout(String raw) {
         if (raw == null || raw.isBlank()) return DEFAULT_TIMEOUT_MS;
         try { return Integer.parseInt(raw); } catch (NumberFormatException e) { return DEFAULT_TIMEOUT_MS; }
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     // =========================================================================
@@ -754,5 +681,16 @@ public class HumifortisRiskEvaluator {
         /** Minimum AAL required to satisfy the challenge (AAL2 default, AAL3 for WebAuthn). */
         @SerializedName("verification_required_level")  public String verification_required_level;
     }
-}
 
+    public record EvaluationResult(Risk risk, EvaluateResponse decision) {}
+
+    private static class TrustTokenPayload {
+        String entity_id;
+        String token_hash;
+        int ttl_days;
+        String device_id;
+        String device_name;
+        String platform;
+        String ip_address;
+    }
+}
