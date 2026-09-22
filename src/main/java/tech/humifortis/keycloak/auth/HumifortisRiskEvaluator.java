@@ -80,7 +80,8 @@ public class HumifortisRiskEvaluator {
         this.userContextExtractor = new UserContextExtractor();
         this.httpClient = HttpClientFactory.create(
                 DEFAULT_TIMEOUT_MS,
-                HttpClientFactory.isInsecureSslEnabled(System.getenv("INSECURE_SSL"))
+                HttpClientFactory.isInsecureSslEnabled(System.getenv("INSECURE_SSL")),
+                envOrDefault("HUMIFORTIS_INSECURE_SSL_CERT_SHA256", null)
         );
     }
 
@@ -102,7 +103,7 @@ public class HumifortisRiskEvaluator {
         return evaluateDetailed(realm, knownUser, flowId).risk();
     }
 
-    public EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId) {
+    EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId) {
         if (knownUser == null) {
             logger.warnf("[HumifortisRiskEvaluator] User is null — fail open");
             return new EvaluationResult(failOpen(), null);
@@ -123,8 +124,7 @@ public class HumifortisRiskEvaluator {
             return new EvaluationResult(failOpen(), null);
         }
 
-        boolean insecureSsl = HttpClientFactory.isInsecureSslEnabled(System.getenv("INSECURE_SSL"));
-        if (!apiUrl.toLowerCase(Locale.ROOT).startsWith("https://") && !insecureSsl) {
+        if (!apiUrl.toLowerCase(Locale.ROOT).startsWith("https://")) {
             logger.warnf("[HumifortisRiskEvaluator] Non-HTTPS URL (entity=%s) — fail open", entityId);
             return new EvaluationResult(failOpen(), null);
         }
@@ -372,8 +372,8 @@ public class HumifortisRiskEvaluator {
         }
         if (!userContext.roleNames().isEmpty()) {
             meta.put("user_roles", String.join(",", userContext.roleNames()));
-            meta.put("is_privileged", String.valueOf(userContext.privileged()));
         }
+        meta.put("is_privileged", String.valueOf(userContext.privileged()));
         meta.put("mfa_enrolled", String.valueOf(userContext.mfaEnrolled()));
         meta.put("active_session_count", String.valueOf(userContext.activeSessionCount()));
 
@@ -682,7 +682,7 @@ public class HumifortisRiskEvaluator {
         @SerializedName("verification_required_level")  public String verification_required_level;
     }
 
-    public record EvaluationResult(Risk risk, EvaluateResponse decision) {}
+    record EvaluationResult(Risk risk, EvaluateResponse decision) {}
 
     private static class TrustTokenPayload {
         String entity_id;

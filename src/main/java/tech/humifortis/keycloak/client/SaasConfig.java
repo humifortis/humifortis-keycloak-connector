@@ -8,6 +8,7 @@ public class SaasConfig {
     private final int timeoutMs;
     private final boolean fallbackAllow;
     private final boolean insecureSsl;
+    private final String insecureSslCertSha256;
 
     public SaasConfig() {
         this(System.getenv());
@@ -19,6 +20,7 @@ public class SaasConfig {
         this.timeoutMs = Integer.parseInt(getEnvOrDefault(env, "HUMIFORTIS_TIMEOUT_MS", "5000"));
         this.fallbackAllow = Boolean.parseBoolean(getEnvOrDefault(env, "HUMIFORTIS_FALLBACK_ALLOW", "true"));
         this.insecureSsl = HttpClientFactory.isInsecureSslEnabled(env.get("INSECURE_SSL"));
+        this.insecureSslCertSha256 = emptyToNull(env.get("HUMIFORTIS_INSECURE_SSL_CERT_SHA256"));
     }
 
     private String getEnvOrDefault(Map<String, String> env, String key, String defaultValue) {
@@ -52,5 +54,13 @@ public class SaasConfig {
 
     public boolean isInsecureSsl() {
         return insecureSsl;
+    }
+
+    public String getInsecureSslCertSha256() {
+        return insecureSslCertSha256;
+    }
+
+    private String emptyToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 }

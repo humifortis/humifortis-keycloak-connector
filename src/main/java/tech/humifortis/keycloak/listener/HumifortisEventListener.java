@@ -564,8 +564,8 @@ public class HumifortisEventListener implements EventListenerProvider {
     private UserContextSnapshot resolveUserContext(Event event) {
         String userId = event.getUserId();
         if (userId == null || userId.isBlank()) return null;
-        RealmModel realm = session.getContext().getRealm();
-        if (realm == null) realm = session.realms().getRealm(event.getRealmId());
+        RealmModel realm = event.getRealmId() != null ? session.realms().getRealm(event.getRealmId()) : null;
+        if (realm == null) realm = session.getContext().getRealm();
         if (realm == null) return null;
         UserModel user = session.users().getUserById(realm, userId);
         if (user == null) return null;

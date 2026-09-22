@@ -37,7 +37,11 @@ public class SaasClient {
         this.gson = new GsonBuilder()
                 .setDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
                 .create();
-        this.httpClient = HttpClientFactory.create(timeoutMs, config.isInsecureSsl());
+        this.httpClient = HttpClientFactory.create(
+                timeoutMs,
+                config.isInsecureSsl(),
+                config.getInsecureSslCertSha256()
+        );
     }
 
     /**
