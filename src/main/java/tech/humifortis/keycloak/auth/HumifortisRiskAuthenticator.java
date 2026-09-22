@@ -22,7 +22,7 @@ import java.util.Locale;
  * <h3>Flow</h3>
  * <ol>
  *   <li>Calls {@link HumifortisRiskEvaluator#evaluate} → POST /api/v1/evaluate with raw context.</li>
- *   <li>Reads the server's PLAYBOOK DECISION from {@link HumifortisRiskEvaluator#LAST_DECISION}.</li>
+ *   <li>Reads the server's PLAYBOOK DECISION from the evaluator result.</li>
  *   <li>Stores risk level + action in auth session notes for downstream conditions.</li>
  *   <li>Fires a {@code CUSTOM_REQUIRED_ACTION} event for the EventListener feedback loop.</li>
  *   <li>Executes the server's enforcement action — NO local policy logic.</li>
@@ -113,15 +113,12 @@ public class HumifortisRiskAuthenticator implements Authenticator {
             logger.debugf("[HumifortisRiskAuthenticator] Could not extract flowId: %s", e.getMessage());
         }
         HumifortisRiskEvaluator evaluator = new HumifortisRiskEvaluator(context.getSession());
-        Risk risk = evaluator.evaluate(context.getRealm(), context.getUser(), flowId);
+        HumifortisRiskEvaluator.EvaluationResult evaluation =
+                evaluator.evaluateDetailed(context.getRealm(), context.getUser(), flowId);
+        Risk risk = evaluation.risk();
 
-        // Step 2 — read server decision (always clean up thread-local)
-        HumifortisRiskEvaluator.EvaluateResponse serverDecision;
-        try {
-            serverDecision = HumifortisRiskEvaluator.LAST_DECISION.get();
-        } finally {
-            HumifortisRiskEvaluator.LAST_DECISION.remove();
-        }
+        // Step 2 — read explicit server decision from evaluator result
+        HumifortisRiskEvaluator.EvaluateResponse serverDecision = evaluation.decision();
 
         String serverAction  = "ALLOW";
         String riskLevel     = "MINIMAL";

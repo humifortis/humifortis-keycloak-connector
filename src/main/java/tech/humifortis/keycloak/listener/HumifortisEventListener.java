@@ -21,6 +21,8 @@ import tech.humifortis.keycloak.client.SaasConfig;
 import tech.humifortis.keycloak.mapper.EventMapper;
 import tech.humifortis.keycloak.model.HumifortisEvent;
 import tech.humifortis.keycloak.auth.HumifortisDeviceCollectorAuthenticator;
+import tech.humifortis.keycloak.user.UserContextExtractor;
+import tech.humifortis.keycloak.user.UserContextSnapshot;
 
 /**
  * Humifortis Event Listener — LEAN connector.
@@ -99,6 +101,7 @@ public class HumifortisEventListener implements EventListenerProvider {
 
     private final SaasClient     saasClient;
     private final EventMapper    eventMapper;
+    private final UserContextExtractor userContextExtractor;
     private final KeycloakSession session;
     /** Set to true when SaasClient/SaasConfig init failed — all onEvent() calls are no-ops. */
     private final boolean        disabled;
@@ -120,6 +123,7 @@ public class HumifortisEventListener implements EventListenerProvider {
         }
         this.saasClient  = client;
         this.eventMapper = mapper;
+        this.userContextExtractor = new UserContextExtractor();
         this.disabled    = isDisabled;
     }
 
@@ -289,33 +293,17 @@ public class HumifortisEventListener implements EventListenerProvider {
             logger.debugf("[HumifortisEventListener] flow_id extraction failed: %s", e.getMessage());
         }
 
+        UserContextSnapshot userContext = resolveUserContext(event);
+
         // Step 4 — Account age (requires UserModel)
         try {
-            String userId = event.getUserId();
-            if (userId != null && !userId.isBlank()) {
-                RealmModel realm = session.getContext().getRealm();
-                UserModel user = session.users().getUserById(realm, userId);
-                if (user != null && user.getCreatedTimestamp() != null) {
-                    long ageDays = ChronoUnit.DAYS.between(
-                            Instant.ofEpochMilli(user.getCreatedTimestamp()), Instant.now());
-                    event.getDetails().put("account_age_days", String.valueOf(ageDays));
-                    // Also add email_verified and mfa_methods here for consistency
-                    event.getDetails().put("email_verified", String.valueOf(user.isEmailVerified()));
-                    List<String> methods = new java.util.ArrayList<>();
-                    user.credentialManager().getStoredCredentialsStream().forEach(c -> {
-                        switch (c.getType()) {
-                            case "otp"                   -> methods.add("TOTP");
-                            case "webauthn"              -> methods.add("WEBAUTHN");
-                            case "webauthn-passwordless" -> methods.add("WEBAUTHN_PASSWORDLESS");
-                        }
-                    });
-                    if (!methods.isEmpty()) {
-                        event.getDetails().put("mfa_methods", String.join(",", methods));
-                    }
-                } else if (user == null) {
-                    logger.debugf("[HumifortisEventListener] account_age_days: user not found for userId=%s", userId);
-                } else {
-                    logger.debugf("[HumifortisEventListener] account_age_days: createdTimestamp is null for userId=%s", userId);
+            if (userContext != null) {
+                if (userContext.accountAgeDays() != null) {
+                    event.getDetails().put("account_age_days", String.valueOf(userContext.accountAgeDays()));
+                }
+                event.getDetails().put("email_verified", String.valueOf(userContext.emailVerified()));
+                if (!userContext.mfaMethods().isEmpty()) {
+                    event.getDetails().put("mfa_methods", String.join(",", userContext.mfaMethods()));
                 }
             }
         } catch (Exception e) {
@@ -324,18 +312,8 @@ public class HumifortisEventListener implements EventListenerProvider {
 
         // Step 5 — Roles (requires UserModel + RoleModel)
         try {
-            String userId = event.getUserId();
-            if (userId != null && !userId.isBlank()) {
-                RealmModel realm = session.getContext().getRealm();
-                UserModel user = session.users().getUserById(realm, userId);
-                if (user != null) {
-                    List<String> roleNames = user.getRoleMappingsStream()
-                            .map(RoleModel::getName)
-                            .toList();
-                    if (!roleNames.isEmpty()) {
-                        event.getDetails().put("user_roles", String.join(",", roleNames));
-                    }
-                }
+            if (userContext != null && !userContext.roleNames().isEmpty()) {
+                event.getDetails().put("user_roles", String.join(",", userContext.roleNames()));
             }
         } catch (Exception e) {
             logger.debugf("[HumifortisEventListener] roles extraction failed: %s", e.getMessage());
@@ -343,18 +321,8 @@ public class HumifortisEventListener implements EventListenerProvider {
 
         // Step 6 — MFA enrolled (requires credential manager)
         try {
-            String userId = event.getUserId();
-            if (userId != null && !userId.isBlank()) {
-                RealmModel realm = session.getContext().getRealm();
-                UserModel user = session.users().getUserById(realm, userId);
-                if (user != null) {
-                    boolean hasMfa = user.credentialManager()
-                            .getStoredCredentialsStream()
-                            .anyMatch(cred -> "otp".equals(cred.getType())
-                                    || "webauthn".equals(cred.getType())
-                                    || "webauthn-passwordless".equals(cred.getType()));
-                    event.getDetails().put("mfa_enrolled", String.valueOf(hasMfa));
-                }
+            if (userContext != null) {
+                event.getDetails().put("mfa_enrolled", String.valueOf(userContext.mfaEnrolled()));
             }
         } catch (Exception e) {
             logger.debugf("[HumifortisEventListener] mfa_enrolled failed: %s", e.getMessage());
@@ -362,16 +330,8 @@ public class HumifortisEventListener implements EventListenerProvider {
 
         // Step 7 — Active session count (requires session provider)
         try {
-            String userId = event.getUserId();
-            if (userId != null && !userId.isBlank()) {
-                RealmModel realm = session.getContext().getRealm();
-                UserModel user = session.users().getUserById(realm, userId);
-                if (user != null) {
-                    long sessionCount = session.sessions()
-                            .getUserSessionsStream(realm, user)
-                            .count();
-                    event.getDetails().put("active_session_count", String.valueOf(sessionCount));
-                }
+            if (userContext != null) {
+                event.getDetails().put("active_session_count", String.valueOf(userContext.activeSessionCount()));
             }
         } catch (Exception e) {
             logger.debugf("[HumifortisEventListener] session_count failed: %s", e.getMessage());
@@ -561,32 +521,14 @@ public class HumifortisEventListener implements EventListenerProvider {
         // IDENTITY — account age, email verification, MFA methods
         // These require UserModel lookup — not available in event.getDetails() for feedback events
         try {
-            String userId = event.getUserId();
-            if (userId != null && !userId.isBlank()) {
-                RealmModel realm = session.getContext().getRealm();
-                UserModel user = session.users().getUserById(realm, userId);
-                if (user != null) {
-                    // account_age_days
-                    if (user.getCreatedTimestamp() != null) {
-                        long ageDays = java.time.temporal.ChronoUnit.DAYS.between(
-                                java.time.Instant.ofEpochMilli(user.getCreatedTimestamp()),
-                                java.time.Instant.now());
-                        feedback.addMetadata("account_age_days", String.valueOf(ageDays));
-                    }
-                    // email_verified
-                    feedback.addMetadata("email_verified", String.valueOf(user.isEmailVerified()));
-                    // mfa_methods — comma-separated enrolled methods
-                    java.util.List<String> methods = new java.util.ArrayList<>();
-                    user.credentialManager().getStoredCredentialsStream().forEach(c -> {
-                        switch (c.getType()) {
-                            case "otp"                   -> methods.add("TOTP");
-                            case "webauthn"              -> methods.add("WEBAUTHN");
-                            case "webauthn-passwordless" -> methods.add("WEBAUTHN_PASSWORDLESS");
-                        }
-                    });
-                    if (!methods.isEmpty()) {
-                        feedback.addMetadata("mfa_methods", String.join(",", methods));
-                    }
+            UserContextSnapshot userContext = resolveUserContext(event);
+            if (userContext != null) {
+                if (userContext.accountAgeDays() != null) {
+                    feedback.addMetadata("account_age_days", String.valueOf(userContext.accountAgeDays()));
+                }
+                feedback.addMetadata("email_verified", String.valueOf(userContext.emailVerified()));
+                if (!userContext.mfaMethods().isEmpty()) {
+                    feedback.addMetadata("mfa_methods", String.join(",", userContext.mfaMethods()));
                 }
             }
         } catch (Exception e) {
@@ -617,6 +559,17 @@ public class HumifortisEventListener implements EventListenerProvider {
         if (event.getDetails() == null) return null;
         String v = event.getDetails().get(key);
         return (v != null && !v.isBlank()) ? v : null;
+    }
+
+    private UserContextSnapshot resolveUserContext(Event event) {
+        String userId = event.getUserId();
+        if (userId == null || userId.isBlank()) return null;
+        RealmModel realm = event.getRealmId() != null ? session.realms().getRealm(event.getRealmId()) : null;
+        if (realm == null) realm = session.getContext().getRealm();
+        if (realm == null) return null;
+        UserModel user = session.users().getUserById(realm, userId);
+        if (user == null) return null;
+        return userContextExtractor.extract(session, realm, user);
     }
 
     /** Copies an AuthNote value into the event details map if the note is present and non-blank. */
