@@ -107,6 +107,35 @@ class CaepReceiverResourceTest {
         assertEquals("accepted", ((java.util.Map<?, ?>) second.getEntity()).get("status"));
     }
 
+    @Test
+    void riskLevelChangeEventIsSupported() {
+        KeycloakSession keycloakSession = mockSessionWithRealm("realm-risk", "realm-risk");
+        CaepSetValidator validator = new CaepSetValidator(uri -> {
+            throw new UnsupportedOperationException();
+        }, Clock.systemUTC()) {
+            @Override
+            public CaepParsedSet validate(String token, CaepConfig config) {
+                JsonObject events = new JsonObject();
+                events.add("https://schemas.openid.net/secevent/caep/event-type/risk-level-change", new JsonObject());
+                return new CaepParsedSet("jti-risk", "iss", Set.of("aud"), Instant.now(), Instant.now().plusSeconds(30), "user", "sid", events);
+            }
+        };
+
+        CaepReceiverResource resource = new CaepReceiverResource(
+                keycloakSession,
+                validator,
+                new CaepReplayGuard(HumifortisCache.getInstance()),
+                new CaepEventRegistry(),
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC));
+        Response response = resource.receive("token");
+
+        assertEquals(200, response.getStatus());
+        java.util.Map<?, ?> body = (java.util.Map<?, ?>) response.getEntity();
+        assertEquals("accepted", body.get("status"));
+        assertEquals("step_up", body.get("action"));
+        assertEquals("enforcement_failed", body.get("processing"));
+    }
+
     private KeycloakSession mockSessionWithRealm(String realmId, String realmName) {
         KeycloakSession session = mock(KeycloakSession.class);
         KeycloakContext context = mock(KeycloakContext.class);

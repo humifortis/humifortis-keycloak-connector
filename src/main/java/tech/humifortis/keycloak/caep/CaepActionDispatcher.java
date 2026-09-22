@@ -19,6 +19,7 @@ public class CaepActionDispatcher {
         return switch (eventName) {
             case CaepEventRegistry.SESSION_REVOKED -> handleSessionRevoked(set, config, realm, false);
             case CaepEventRegistry.ASSURANCE_LEVEL_CHANGE -> handleStepUp(set, config, realm);
+            case CaepEventRegistry.RISK_LEVEL_CHANGE -> handleStepUp(set, config, realm);
             default -> CaepDispatchResult.noAction("unsupported event");
         };
     }
