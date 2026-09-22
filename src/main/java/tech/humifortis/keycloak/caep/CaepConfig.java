@@ -39,6 +39,9 @@ public record CaepConfig(
         String realmValue = realm.getAttribute(PREFIX + key);
         if (realmValue != null && !realmValue.isBlank()) return realmValue.trim();
         String envValue = System.getenv(toEnv(PREFIX + key));
+        if (envValue == null || envValue.isBlank()) {
+            envValue = System.getenv(toSnakeEnv(PREFIX + key));
+        }
         return (envValue == null || envValue.isBlank()) ? defaultValue : envValue.trim();
     }
 
@@ -58,5 +61,19 @@ public record CaepConfig(
 
     private static String toEnv(String key) {
         return key.toUpperCase().replace('.', '_');
+    }
+
+    private static String toSnakeEnv(String key) {
+        StringBuilder out = new StringBuilder();
+        for (char c : key.toCharArray()) {
+            if (c == '.') {
+                out.append('_');
+            } else if (Character.isUpperCase(c)) {
+                out.append('_').append(c);
+            } else {
+                out.append(Character.toUpperCase(c));
+            }
+        }
+        return out.toString();
     }
 }

@@ -88,10 +88,10 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
 | `HF_CAEP_ENABLED` | No | `false` | Enable CAEP/SSF receiver (`POST /realms/{realm}/ssf/caep/events`) |
 | `HF_CAEP_ISSUER` | No | - | Trusted Humifortis SET issuer (`iss`) |
 | `HF_CAEP_AUDIENCE` | No | - | Expected audience (`aud`) |
-| `HF_CAEP_JWKSURI` | No | - | JWKS URI used to verify Humifortis asymmetric signatures |
-| `HF_CAEP_CLOCKSKEWSECONDS` | No | `60` | Clock skew tolerance for `iat`/`exp` validation |
+| `HF_CAEP_JWKS_URI` | No | - | JWKS URI used to verify Humifortis asymmetric signatures |
+| `HF_CAEP_CLOCK_SKEW_SECONDS` | No | `60` | Clock skew tolerance for `iat`/`exp` validation |
 | `HF_CAEP_REPLAY_ENABLED` | No | `true` | Enable replay protection keyed by `jti` |
-| `HF_CAEP_REPLAY_TTLSECONDS` | No | `600` | Replay cache TTL in seconds |
+| `HF_CAEP_REPLAY_TTL_SECONDS` | No | `600` | Replay cache TTL in seconds |
 
 ### Example Configuration
 
@@ -108,7 +108,7 @@ export HUMIFORTIS_FALLBACK_ALLOW=true
 export HF_CAEP_ENABLED=true
 export HF_CAEP_ISSUER=https://humifortis.example/ssf
 export HF_CAEP_AUDIENCE=keycloak-realm
-export HF_CAEP_JWKSURI=https://humifortis.example/.well-known/jwks.json
+export HF_CAEP_JWKS_URI=https://humifortis.example/.well-known/jwks.json
 ```
 
 ### Realm-scoped CAEP settings
@@ -127,6 +127,8 @@ The CAEP receiver is realm-scoped. Each realm can override configuration with re
 - `hf.caep.enforce.sessionRevoked`
 - `hf.caep.enforce.stepUp`
 - `hf.caep.enforce.stepUpAsReauth`
+
+> Compatibility note: both underscore (`HF_CAEP_JWKS_URI`) and compact (`HF_CAEP_JWKSURI`) env names are accepted.
 
 ## 🏗️ Architecture
 

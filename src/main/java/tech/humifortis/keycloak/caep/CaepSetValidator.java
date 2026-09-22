@@ -16,7 +16,6 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HashSet;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -116,17 +115,30 @@ public class CaepSetValidator {
     }
 
     private PublicKey selectKey(JsonArray keys, String kid) {
-        PublicKey fallback = null;
+        if (kid == null || kid.isBlank()) {
+            PublicKey single = null;
+            int candidates = 0;
+            for (JsonElement keyElem : keys) {
+                if (!keyElem.isJsonObject()) continue;
+                JsonObject jwk = keyElem.getAsJsonObject();
+                String kty = getOptionalString(jwk, "kty");
+                if (!"RSA".equals(kty)) continue;
+                candidates++;
+                if (single == null) single = parseRsaKey(jwk);
+            }
+            if (candidates == 1 && single != null) return single;
+            throw new CaepValidationException(401, "Missing kid for multi-key JWKS");
+        }
+
         for (JsonElement keyElem : keys) {
             if (!keyElem.isJsonObject()) continue;
             JsonObject jwk = keyElem.getAsJsonObject();
             String jwkKid = getOptionalString(jwk, "kid");
-            if (kid != null && !kid.isBlank() && !kid.equals(jwkKid)) continue;
-            PublicKey key = parseRsaKey(jwk);
-            if (kid != null && !kid.isBlank()) return key;
-            if (fallback == null) fallback = key;
+            if (!kid.equals(jwkKid)) continue;
+            String kty = getOptionalString(jwk, "kty");
+            if (!"RSA".equals(kty)) continue;
+            return parseRsaKey(jwk);
         }
-        if (fallback != null) return fallback;
         throw new CaepValidationException(401, "No matching key");
     }
 

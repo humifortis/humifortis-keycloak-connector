@@ -35,7 +35,8 @@ class CaepReceiverResourceTest {
                 keycloakSession,
                 validator,
                 new CaepReplayGuard(HumifortisCache.getInstance()),
-                new CaepEventRegistry());
+                new CaepEventRegistry(),
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC));
 
         Response response = resource.receive("token");
         assertEquals(401, response.getStatus());
@@ -59,9 +60,51 @@ class CaepReceiverResourceTest {
         CaepConfig realmConfig = new CaepConfig(true, "iss", "aud", "jwks", 60, true, 600, true, true, true, true, false);
         guard.isReplay("realm-b", "jti-replay", realmConfig);
 
-        CaepReceiverResource resource = new CaepReceiverResource(keycloakSession, validator, guard, new CaepEventRegistry());
+        CaepReceiverResource resource = new CaepReceiverResource(
+                keycloakSession,
+                validator,
+                guard,
+                new CaepEventRegistry(),
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC));
         Response response = resource.receive("token");
         assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void replayKeyIsRealmScoped() {
+        CaepSetValidator validator = new CaepSetValidator(uri -> {
+            throw new UnsupportedOperationException();
+        }, Clock.systemUTC()) {
+            @Override
+            public CaepParsedSet validate(String token, CaepConfig config) {
+                JsonObject events = new JsonObject();
+                events.add("session-revoked", new JsonObject());
+                return new CaepParsedSet("jti-shared", "iss", Set.of("aud"), Instant.now(), Instant.now().plusSeconds(30), "user", "sid", events);
+            }
+        };
+
+        CaepReplayGuard guard = new CaepReplayGuard(HumifortisCache.getInstance());
+        HumifortisCache.getInstance().clear();
+
+        CaepReceiverResource realmOne = new CaepReceiverResource(
+                mockSessionWithRealm("realm-1", "realm-1"),
+                validator,
+                guard,
+                new CaepEventRegistry(),
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC));
+        Response first = realmOne.receive("token");
+        assertEquals(200, first.getStatus());
+        assertEquals("accepted", ((java.util.Map<?, ?>) first.getEntity()).get("status"));
+
+        CaepReceiverResource realmTwo = new CaepReceiverResource(
+                mockSessionWithRealm("realm-2", "realm-2"),
+                validator,
+                guard,
+                new CaepEventRegistry(),
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC));
+        Response second = realmTwo.receive("token");
+        assertEquals(200, second.getStatus());
+        assertEquals("accepted", ((java.util.Map<?, ?>) second.getEntity()).get("status"));
     }
 
     private KeycloakSession mockSessionWithRealm(String realmId, String realmName) {

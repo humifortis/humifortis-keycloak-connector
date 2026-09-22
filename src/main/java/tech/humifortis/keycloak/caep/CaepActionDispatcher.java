@@ -25,7 +25,12 @@ public class CaepActionDispatcher {
 
     private CaepDispatchResult handleSessionRevoked(CaepParsedSet set, CaepConfig config, RealmModel realm, boolean fromStepUp) {
         String action = fromStepUp ? "step_up_reauth" : "session_revoked";
-        if (!config.enforceSessionRevoked()) return CaepDispatchResult.noAction("session revocation enforcement disabled");
+        if (fromStepUp && !config.enforceStepUpAsReauth()) {
+            return CaepDispatchResult.noAction("step-up reauth enforcement disabled");
+        }
+        if (!fromStepUp && !config.enforceSessionRevoked()) {
+            return CaepDispatchResult.noAction("session revocation enforcement disabled");
+        }
         try {
             if (set.sessionId() != null && !set.sessionId().isBlank()) {
                 UserSessionModel target = session.sessions().getUserSession(realm, set.sessionId());
@@ -43,7 +48,8 @@ public class CaepActionDispatcher {
             sessions.forEach(s -> session.sessions().removeUserSession(realm, s));
             return CaepDispatchResult.success(action);
         } catch (Exception e) {
-            return CaepDispatchResult.failed(action, e.getMessage());
+            String message = e.getMessage() == null || e.getMessage().isBlank() ? "dispatch error" : e.getMessage();
+            return CaepDispatchResult.failed(action, message);
         }
     }
 

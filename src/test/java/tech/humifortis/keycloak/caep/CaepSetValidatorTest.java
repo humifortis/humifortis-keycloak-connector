@@ -33,8 +33,8 @@ class CaepSetValidatorTest {
         JsonObject key = new JsonObject();
         key.addProperty("kty", "RSA");
         key.addProperty("kid", "kid-1");
-        key.addProperty("n", Base64.getUrlEncoder().withoutPadding().encodeToString(publicKey.getModulus().toByteArray()));
-        key.addProperty("e", Base64.getUrlEncoder().withoutPadding().encodeToString(publicKey.getPublicExponent().toByteArray()));
+        key.addProperty("n", toUnsignedBase64Url(publicKey.getModulus().toByteArray()));
+        key.addProperty("e", toUnsignedBase64Url(publicKey.getPublicExponent().toByteArray()));
         jwks = new JsonArray();
         jwks.add(key);
 
@@ -87,6 +87,39 @@ class CaepSetValidatorTest {
         assertEquals(400, expiredEx.getStatusCode());
     }
 
+    @Test
+    void rejectsMissingAndEmptyEventsClaim() throws Exception {
+        CaepSetValidator validator = new CaepSetValidator(uri -> jwks, clock);
+        String missingEvents = buildTokenFromPayload("""
+                {
+                  "iss":"https://issuer.test",
+                  "aud":"keycloak-realm",
+                  "iat":1767225570,
+                  "exp":1767225900,
+                  "jti":"j-6",
+                  "sub":"user-1",
+                  "sid":"sess-1"
+                }
+                """);
+        CaepValidationException missing = assertThrows(CaepValidationException.class, () -> validator.validate(missingEvents, config));
+        assertEquals(400, missing.getStatusCode());
+
+        String emptyEvents = buildTokenFromPayload("""
+                {
+                  "iss":"https://issuer.test",
+                  "aud":"keycloak-realm",
+                  "iat":1767225570,
+                  "exp":1767225900,
+                  "jti":"j-7",
+                  "sub":"user-1",
+                  "sid":"sess-1",
+                  "events":{}
+                }
+                """);
+        CaepValidationException empty = assertThrows(CaepValidationException.class, () -> validator.validate(emptyEvents, config));
+        assertEquals(400, empty.getStatusCode());
+    }
+
     private String buildToken(String issuer, String audience, long iat, long exp, String jti) throws Exception {
         String header = "{\"alg\":\"RS256\",\"kid\":\"kid-1\",\"typ\":\"secevent+jwt\"}";
         String payload = """
@@ -103,6 +136,17 @@ class CaepSetValidatorTest {
                 """.formatted(issuer, audience, iat, exp, jti).replace("\n", "").replace(" ", "");
         String encodedHeader = Base64.getUrlEncoder().withoutPadding().encodeToString(header.getBytes(StandardCharsets.UTF_8));
         String encodedPayload = Base64.getUrlEncoder().withoutPadding().encodeToString(payload.getBytes(StandardCharsets.UTF_8));
+        return sign(encodedHeader, encodedPayload);
+    }
+
+    private String buildTokenFromPayload(String payload) throws Exception {
+        String header = "{\"alg\":\"RS256\",\"kid\":\"kid-1\",\"typ\":\"secevent+jwt\"}";
+        String encodedHeader = Base64.getUrlEncoder().withoutPadding().encodeToString(header.getBytes(StandardCharsets.UTF_8));
+        String encodedPayload = Base64.getUrlEncoder().withoutPadding().encodeToString(payload.replace("\n", "").replace(" ", "").getBytes(StandardCharsets.UTF_8));
+        return sign(encodedHeader, encodedPayload);
+    }
+
+    private String sign(String encodedHeader, String encodedPayload) throws Exception {
         String signingInput = encodedHeader + "." + encodedPayload;
 
         Signature signature = Signature.getInstance("SHA256withRSA");
@@ -110,5 +154,12 @@ class CaepSetValidatorTest {
         signature.update(signingInput.getBytes(StandardCharsets.UTF_8));
         String encodedSignature = Base64.getUrlEncoder().withoutPadding().encodeToString(signature.sign());
         return signingInput + "." + encodedSignature;
+    }
+
+    private String toUnsignedBase64Url(byte[] value) {
+        int offset = (value.length > 1 && value[0] == 0) ? 1 : 0;
+        byte[] unsigned = new byte[value.length - offset];
+        System.arraycopy(value, offset, unsigned, 0, unsigned.length);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(unsigned);
     }
 }

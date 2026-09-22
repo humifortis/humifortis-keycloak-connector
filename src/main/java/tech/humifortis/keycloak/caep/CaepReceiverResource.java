@@ -1,7 +1,6 @@
 package tech.humifortis.keycloak.caep;
 
 import com.google.gson.JsonObject;
-import com.google.gson.JsonPrimitive;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
@@ -15,7 +14,9 @@ import tech.humifortis.keycloak.HumifortisCache;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 
 @Path("")
 public class CaepReceiverResource {
@@ -25,16 +26,18 @@ public class CaepReceiverResource {
     private final CaepSetValidator validator;
     private final CaepReplayGuard replayGuard;
     private final CaepEventRegistry registry;
+    private final Clock clock;
 
     public CaepReceiverResource(KeycloakSession session) {
-        this(session, new CaepSetValidator(new HttpCaepJwksFetcher(), Clock.systemUTC()), new CaepReplayGuard(HumifortisCache.getInstance()), new CaepEventRegistry());
+        this(session, new CaepSetValidator(new HttpCaepJwksFetcher(), Clock.systemUTC()), new CaepReplayGuard(HumifortisCache.getInstance()), new CaepEventRegistry(), Clock.systemUTC());
     }
 
-    CaepReceiverResource(KeycloakSession session, CaepSetValidator validator, CaepReplayGuard replayGuard, CaepEventRegistry registry) {
+    CaepReceiverResource(KeycloakSession session, CaepSetValidator validator, CaepReplayGuard replayGuard, CaepEventRegistry registry, Clock clock) {
         this.session = session;
         this.validator = validator;
         this.replayGuard = replayGuard;
         this.registry = registry;
+        this.clock = clock;
     }
 
     @POST
@@ -51,7 +54,7 @@ public class CaepReceiverResource {
             return Response.status(Response.Status.BAD_REQUEST).entity(Map.of("error", "CAEP receiver disabled")).build();
         }
 
-        Instant receivedAt = Instant.now();
+        Instant receivedAt = clock.instant();
         CaepParsedSet set;
         try {
             set = validator.validate(token, config);
@@ -80,9 +83,10 @@ public class CaepReceiverResource {
         }
 
         CaepActionDispatcher dispatcher = new CaepActionDispatcher(session);
-        String finalProcessing = "ignored";
-        String finalAction = "none";
-        String finalError = "";
+        boolean hasProcessed = false;
+        boolean hasFailure = false;
+        Set<String> actions = new LinkedHashSet<>();
+        Set<String> errors = new LinkedHashSet<>();
 
         for (Map.Entry<String, com.google.gson.JsonElement> eventEntry : set.events().entrySet()) {
             String eventUri = eventEntry.getKey();
@@ -98,10 +102,15 @@ public class CaepReceiverResource {
 
             CaepDispatchResult result = dispatcher.dispatch(eventName, set, config, realm);
             audit(buildAudit(set, realm, "valid", result.processingResult(), result.action(), result.error(), receivedAt, eventName, extractDecisionId(eventEntry.getValue())));
-            finalProcessing = result.processingResult();
-            finalAction = result.action();
-            finalError = result.error();
+            if ("processed".equals(result.processingResult())) hasProcessed = true;
+            if ("enforcement_failed".equals(result.processingResult())) hasFailure = true;
+            if (result.action() != null && !result.action().isBlank() && !"none".equals(result.action())) actions.add(result.action());
+            if (result.error() != null && !result.error().isBlank()) errors.add(result.error());
         }
+
+        String finalProcessing = hasFailure ? "enforcement_failed" : (hasProcessed ? "processed" : "ignored");
+        String finalAction = actions.isEmpty() ? "none" : String.join(",", actions);
+        String finalError = errors.isEmpty() ? "" : String.join(" | ", errors);
 
         return Response.ok(Map.of(
                 "status", "accepted",

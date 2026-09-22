@@ -3,6 +3,7 @@ package tech.humifortis.keycloak.caep;
 import tech.humifortis.keycloak.HumifortisCache;
 
 public class CaepReplayGuard {
+    private static final Object LOCK = new Object();
     private final HumifortisCache cache;
 
     public CaepReplayGuard(HumifortisCache cache) {
@@ -12,9 +13,11 @@ public class CaepReplayGuard {
     public boolean isReplay(String realmId, String jti, CaepConfig config) {
         if (!config.replayEnabled()) return false;
         String key = "caep:replay:" + realmId + ":" + jti;
-        if (cache.exists(key)) return true;
         long ttlMs = Math.max(config.replayTtlSeconds(), 1) * 1000L;
-        cache.mark(key, ttlMs);
-        return false;
+        synchronized (LOCK) {
+            if (cache.exists(key)) return true;
+            cache.mark(key, ttlMs);
+            return false;
+        }
     }
 }
