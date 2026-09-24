@@ -23,4 +23,17 @@ class HumifortisRiskEvaluatorDetailedTest {
         assertEquals("Humifortis unavailable - fail open", result.risk().getReason().orElseThrow());
         assertNull(result.decision());
     }
+
+    @Test
+    void endpointPolicy_rejectsPlainHttpWithoutExplicitOverride() {
+        assertEquals(false, HumifortisRiskEvaluator.isAllowedEndpoint("http://hf-proxy:80", null));
+        assertEquals(false, HumifortisRiskEvaluator.isAllowedEndpoint("http://hf-proxy:80", "false"));
+    }
+
+    @Test
+    void endpointPolicy_allowsHttpsAndExplicitTestHttpOverride() {
+        assertEquals(true, HumifortisRiskEvaluator.isAllowedEndpoint("https://core.example", null));
+        assertEquals(true, HumifortisRiskEvaluator.isAllowedEndpoint("http://hf-proxy:80", "true"));
+        assertEquals(false, HumifortisRiskEvaluator.isAllowedEndpoint("ftp://core.example", "true"));
+    }
 }

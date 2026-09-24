@@ -42,7 +42,7 @@ public class CaepActionDispatcher {
             if (set.subject() == null || set.subject().isBlank()) {
                 return CaepDispatchResult.noAction("missing sub for user-level revocation");
             }
-            UserModel user = session.users().getUserById(realm, set.subject());
+            UserModel user = session.users().getUserById(realm, resolveUserId(set.subject()));
             if (user == null) return CaepDispatchResult.noAction("target user not found");
             List<UserSessionModel> sessions = session.sessions().getUserSessionsStream(realm, user).collect(Collectors.toList());
             if (sessions.isEmpty()) return CaepDispatchResult.noAction("no active sessions for subject");
@@ -52,6 +52,16 @@ public class CaepActionDispatcher {
             String message = e.getMessage() == null || e.getMessage().isBlank() ? "dispatch error" : e.getMessage();
             return CaepDispatchResult.failed(action, message);
         }
+    }
+
+    private String resolveUserId(String subject) {
+        if (subject != null && subject.startsWith("user:keycloak:")) {
+            int lastSeparator = subject.lastIndexOf(':');
+            if (lastSeparator >= 0 && lastSeparator + 1 < subject.length()) {
+                return subject.substring(lastSeparator + 1);
+            }
+        }
+        return subject;
     }
 
     private CaepDispatchResult handleStepUp(CaepParsedSet set, CaepConfig config, RealmModel realm) {

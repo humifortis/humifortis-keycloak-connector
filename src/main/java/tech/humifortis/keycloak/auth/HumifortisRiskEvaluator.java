@@ -48,6 +48,8 @@ import tech.humifortis.keycloak.user.UserContextSnapshot;
  *   <li>{@code HUMIFORTIS_TIMEOUT_MS} — default 2000</li>
  *   <li>{@code HUMIFORTIS_TENANT_ID}  — default realm name</li>
  *   <li>{@code INSECURE_SSL=true}     — skip TLS verification (dev/test only)</li>
+ *   <li>{@code HUMIFORTIS_ALLOW_INSECURE_HTTP=true} — permit a non-TLS internal
+ *       endpoint in an explicitly configured development/test deployment only</li>
  * </ul>
  */
 public class HumifortisRiskEvaluator {
@@ -58,6 +60,7 @@ public class HumifortisRiskEvaluator {
     static final String ENV_API_KEY    = "HUMIFORTIS_API_KEY";
     static final String ENV_TIMEOUT_MS = "HUMIFORTIS_TIMEOUT_MS";
     static final String ENV_TENANT_ID  = "HUMIFORTIS_TENANT_ID";
+    static final String ENV_ALLOW_INSECURE_HTTP = "HUMIFORTIS_ALLOW_INSECURE_HTTP";
 
     static final String DEFAULT_API_URL   = "https://api.humifortis.com";
     static final int    DEFAULT_TIMEOUT_MS = 2000;
@@ -124,9 +127,13 @@ public class HumifortisRiskEvaluator {
             return new EvaluationResult(failOpen(), null);
         }
 
-        if (!apiUrl.toLowerCase(Locale.ROOT).startsWith("https://")) {
+        boolean secureUrl = apiUrl.toLowerCase(Locale.ROOT).startsWith("https://");
+        if (!isAllowedEndpoint(apiUrl, System.getenv(ENV_ALLOW_INSECURE_HTTP))) {
             logger.warnf("[HumifortisRiskEvaluator] Non-HTTPS URL (entity=%s) — fail open", entityId);
             return new EvaluationResult(failOpen(), null);
+        }
+        if (!secureUrl) {
+            logger.warnf("[HumifortisRiskEvaluator] Explicit insecure HTTP override enabled (entity=%s)", entityId);
         }
 
         try {
@@ -186,6 +193,13 @@ public class HumifortisRiskEvaluator {
             recordFailure();
             return new EvaluationResult(failOpen(), null);
         }
+    }
+
+    static boolean isAllowedEndpoint(String apiUrl, String allowInsecureHttp) {
+        if (apiUrl == null || apiUrl.isBlank()) return false;
+        if (apiUrl.toLowerCase(Locale.ROOT).startsWith("https://")) return true;
+        return "true".equalsIgnoreCase(allowInsecureHttp)
+                && apiUrl.toLowerCase(Locale.ROOT).startsWith("http://");
     }
 
     // =========================================================================
