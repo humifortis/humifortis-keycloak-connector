@@ -112,34 +112,9 @@
     <build>
         <finalName>humifortis-keycloak-connector</finalName>
         <plugins>
-            <!-- ── Copy JS bundle from device-collector-ui/dist into the theme ── -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-resources-plugin</artifactId>
-                <version>3.3.1</version>
-                <executions>
-                    <execution>
-                        <id>copy-js-bundle</id>
-                        <phase>generate-resources</phase>
-                        <goals><goal>copy-resources</goal></goals>
-                        <configuration>
-                            <outputDirectory>
-                                ${project.basedir}/src/main/resources/theme/humifortis/login/resources/js
-                            </outputDirectory>
-                            <overwrite>true</overwrite>
-                            <resources>
-                                <resource>
-                                    <directory>${project.basedir}/device-collector-ui/dist</directory>
-                                    <includes>
-                                        <include>humifortis-device.bundle.js</include>
-                                    </includes>
-                                    <filtering>false</filtering>
-                                </resource>
-                            </resources>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
+            <!-- The device-collector JS bundle is built by device-collector-ui (npm run build) straight
+                 into src/main/resources/theme-resources/resources/js and committed: the jar is
+                 self-contained and served to every login theme. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>

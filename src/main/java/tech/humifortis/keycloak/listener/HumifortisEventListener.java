@@ -20,6 +20,7 @@ import tech.humifortis.keycloak.client.SaasClient;
 import tech.humifortis.keycloak.client.SaasConfig;
 import tech.humifortis.keycloak.mapper.EventMapper;
 import tech.humifortis.keycloak.model.HumifortisEvent;
+import tech.humifortis.keycloak.auth.DeviceSignals;
 import tech.humifortis.keycloak.auth.HumifortisDeviceCollectorAuthenticator;
 import tech.humifortis.keycloak.user.UserContextExtractor;
 import tech.humifortis.keycloak.user.UserContextSnapshot;
@@ -381,6 +382,48 @@ public class HumifortisEventListener implements EventListenerProvider {
             mergeDeviceDetail(event, as, "device_math_consistency", HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_MATH_CONSISTENCY);
         } catch (Exception e) {
             logger.debugf("[HumifortisEventListener] device signals enrichment failed: %s", e.getMessage());
+        }
+
+        // Step 10 — A failed login never reaches the collector step: when the login theme runs the
+        // collector script (opt-in), the signals are in the very POST that failed.
+        if (event.getType() == EventType.LOGIN_ERROR) {
+            mergeDeviceSignalsFromLoginForm(event);
+        }
+    }
+
+    private void mergeDeviceSignalsFromLoginForm(Event event) {
+        try {
+            String existing = event.getDetails().get("device_id");
+            if (existing != null && !existing.isBlank()) return;
+            var request = session.getContext().getHttpRequest();
+            if (request == null || !"POST".equalsIgnoreCase(request.getHttpMethod())) return;
+            DeviceSignals signals = DeviceSignals.fromForm(request.getDecodedFormParameters());
+            if (signals == null) return;
+            String binding = signals.validateBinding(serverTabId(event, request), System.currentTimeMillis());
+            signals.writeEventDetails((k, v) -> event.getDetails().put(k, v), binding, true);
+        } catch (Exception e) {
+            logger.debugf("[HumifortisEventListener] device signals from the login form failed: %s", e.getMessage());
+        }
+    }
+
+    /**
+     * The anti-replay nonce of a login-page submission: the tab id of the login form — accepted
+     * only when that tab exists in this browser's authentication session on the server (a value
+     * the server issued, not one the client chose). Null when it cannot be established.
+     */
+    private String serverTabId(Event event, org.keycloak.http.HttpRequest request) {
+        try {
+            var as = session.getContext().getAuthenticationSession();
+            if (as != null && as.getTabId() != null) return as.getTabId();
+            String tabId = request.getUri().getQueryParameters().getFirst("tab_id");
+            var realm = session.getContext().getRealm();
+            if (tabId == null || realm == null || event.getClientId() == null) return null;
+            var root = new org.keycloak.services.managers.AuthenticationSessionManager(session).getCurrentRootAuthenticationSession(realm);
+            var client = realm.getClientByClientId(event.getClientId());
+            if (root == null || client == null || root.getAuthenticationSession(client, tabId) == null) return null;
+            return tabId;
+        } catch (Exception e) {
+            return null;
         }
     }
 

@@ -20,6 +20,8 @@ public class CaepActionDispatcher {
             case CaepEventRegistry.SESSION_REVOKED -> handleSessionRevoked(set, config, realm, false);
             case CaepEventRegistry.ASSURANCE_LEVEL_CHANGE -> handleStepUp(set, config, realm);
             case CaepEventRegistry.RISK_LEVEL_CHANGE -> handleStepUp(set, config, realm);
+            case CaepEventRegistry.ACCOUNT_DISABLED -> handleAccountDisabled(set, config, realm);
+            case CaepEventRegistry.CREDENTIAL_COMPROMISE -> handleCredentialCompromise(set, config, realm);
             default -> CaepDispatchResult.noAction("unsupported event");
         };
     }
@@ -52,6 +54,48 @@ public class CaepActionDispatcher {
             String message = e.getMessage() == null || e.getMessage().isBlank() ? "dispatch error" : e.getMessage();
             return CaepDispatchResult.failed(action, message);
         }
+    }
+
+    /** An analyst locked the account: disable the Keycloak user and end its sessions. */
+    private CaepDispatchResult handleAccountDisabled(CaepParsedSet set, CaepConfig config, RealmModel realm) {
+        if (!config.enforceAccountDisabled()) return CaepDispatchResult.noAction("account lock enforcement disabled (hf.caep.enforce.accountDisabled)");
+        try {
+            UserModel user = targetUser(set, realm);
+            if (user == null) return CaepDispatchResult.noAction("target user not found");
+            user.setEnabled(false);
+            revokeAllSessions(user, realm);
+            return CaepDispatchResult.success("account_disabled");
+        } catch (Exception e) {
+            return CaepDispatchResult.failed("account_disabled", messageOf(e));
+        }
+    }
+
+    /** The credentials are suspected compromised: require a new password at the next login and end the sessions. */
+    private CaepDispatchResult handleCredentialCompromise(CaepParsedSet set, CaepConfig config, RealmModel realm) {
+        if (!config.enforceCredentialCompromise()) return CaepDispatchResult.noAction("password reset enforcement disabled (hf.caep.enforce.credentialCompromise)");
+        try {
+            UserModel user = targetUser(set, realm);
+            if (user == null) return CaepDispatchResult.noAction("target user not found");
+            user.addRequiredAction(UserModel.RequiredAction.UPDATE_PASSWORD);
+            revokeAllSessions(user, realm);
+            return CaepDispatchResult.success("password_reset_required");
+        } catch (Exception e) {
+            return CaepDispatchResult.failed("password_reset_required", messageOf(e));
+        }
+    }
+
+    private UserModel targetUser(CaepParsedSet set, RealmModel realm) {
+        if (set.subject() == null || set.subject().isBlank()) return null;
+        return session.users().getUserById(realm, resolveUserId(set.subject()));
+    }
+
+    private void revokeAllSessions(UserModel user, RealmModel realm) {
+        List<UserSessionModel> sessions = session.sessions().getUserSessionsStream(realm, user).collect(Collectors.toList());
+        sessions.forEach(s -> session.sessions().removeUserSession(realm, s));
+    }
+
+    private static String messageOf(Exception e) {
+        return e.getMessage() == null || e.getMessage().isBlank() ? "dispatch error" : e.getMessage();
     }
 
     private String resolveUserId(String subject) {

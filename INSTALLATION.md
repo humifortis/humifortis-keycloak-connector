@@ -186,29 +186,53 @@ You should now see "humifortis-event-listener" in the enabled listeners list.
 
 ## Step 6: Configure Authentication Flow
 
-### Add RBA Authenticator to Browser Flow
+### Add the Humifortis steps to the Browser flow
 
 1. Navigate to: **Authentication** → **Flows** tab
-2. Select the **Browser** flow (or create a copy)
-3. Click **Add step**
-4. Find and select: **Humifortis Risk-Based Authentication**
-5. Click **Add**
-6. Move the authenticator to be **after "Username Password Form"**
-7. Set the **Requirement** to **REQUIRED**
-8. Click **Save**
+2. Duplicate the **Browser** flow (e.g. `humifortis-browser`) and open its **Forms** sub-flow
+3. After **Username Password Form**, add these two steps, both **REQUIRED**, in this order:
+   - **Humifortis Device Collector** — gathers the browser's device signals
+   - **Humifortis Risk Authenticator** — asks Humifortis for the decision
+4. Bind the new flow as the realm's **Browser flow** (Action → Bind flow)
 
 Your flow should look like this:
 
 ```
-Browser Flow:
+humifortis-browser
 ├── Cookie (ALTERNATIVE)
 ├── Kerberos (DISABLED)
-└── Identity Provider Redirector (ALTERNATIVE)
+├── Identity Provider Redirector (ALTERNATIVE)
 └── Forms (ALTERNATIVE)
     ├── Username Password Form (REQUIRED)
-    ├── Humifortis Risk-Based Authentication (REQUIRED)  ← New
+    ├── Humifortis Device Collector (REQUIRED)      ← new
+    ├── Humifortis Risk Authenticator (REQUIRED)    ← new
     └── Browser - Conditional OTP (CONDITIONAL)
 ```
+
+That is all device collection needs: the collector script ships inside the connector jar and
+works with **any** login theme. After the password, the user sees a short page (well under a
+second) while the device signals are gathered.
+
+### Recommended: collect the device on the login page itself (one line)
+
+Add this line to your login theme's `theme.properties`
+(`themes/<your-theme>/login/theme.properties`):
+
+```properties
+scripts=js/humifortis-device.bundle.js
+```
+
+If the file already has a `scripts=` line, append the entry to it, separated by a space. With it:
+
+- the device signals are sent with the username/password form, so **failed logins carry the
+  device too** — needed to detect one device trying several accounts (credential stuffing);
+- the short page after the password disappears;
+- nothing else changes: the flow stays the same, and if the script cannot run (JavaScript
+  disabled or blocked) the login proceeds and the Device Collector step collects as before.
+
+The script never blocks a login: if it has not finished when the user submits, it waits at most
+1.5 s, then submits anyway. The signals are bound to the login session (anti-replay) and
+checked by the connector.
 
 ## Step 7: Test the Installation
 
@@ -239,7 +263,7 @@ tail -f /opt/keycloak/data/log/keycloak.log
 
 # Look for these messages:
 # [HumifortisEventListener] Humifortis Event Listener initialized successfully
-# [HumifortisRBAAuthenticator] Humifortis RBA Authenticator initialized
+# [HumifortisRiskAuthenticator] ...
 ```
 
 ### Check SaaS Dashboard

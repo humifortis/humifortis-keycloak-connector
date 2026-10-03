@@ -64,7 +64,7 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
 2. **Add to Authentication Flow:**
    - Go to: **Authentication → Flows → Browser**
    - Click **Add Step**
-   - Select: "Humifortis Risk-Based Authentication"
+   - Select: "Humifortis Risk Authenticator" (after "Humifortis Device Collector" — see INSTALLATION.md, Step 6)
    - Place it after "Username Password Form"
    - Set requirement to **REQUIRED**
    - Save
@@ -92,6 +92,14 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
 | `HF_CAEP_CLOCK_SKEW_SECONDS` | No | `60` | Clock skew tolerance for `iat`/`exp` validation |
 | `HF_CAEP_REPLAY_ENABLED` | No | `true` | Enable replay protection keyed by `jti` |
 | `HF_CAEP_REPLAY_TTL_SECONDS` | No | `600` | Replay cache TTL in seconds |
+| `HF_CAEP_ENFORCE_ACCOUNT_DISABLED` | No | `false` | Let an analyst's **Lock the account** response (RISC `account-disabled`) disable the Keycloak user and end its sessions |
+| `HF_CAEP_ENFORCE_CREDENTIAL_COMPROMISE` | No | `false` | Let an analyst's **Force a new password** response (RISC `credential-compromise`) require `UPDATE_PASSWORD` at the next login and end the sessions |
+
+The two `ENFORCE` switches are **off by default**: an event that changes an account is acted on only when you
+enable it. They can also be set as realm attributes (`hf.caep.enforce.accountDisabled`,
+`hf.caep.enforce.credentialCompromise`). Ending sessions (CAEP `session-revoked`) follows the existing
+`hf.caep.enforce.sessionRevoked` setting. A SET the connector does not act on is answered with
+`processing: ignored` and the reason, so Humifortis shows the analyst that nothing was done.
 
 ### Example Configuration
 
@@ -273,8 +281,12 @@ humifortis-keycloak-connector/
 │   │   ├── HumifortisEventListener.java
 │   │   └── HumifortisEventListenerFactory.java
 │   ├── auth/
-│   │   ├── HumifortisRBAAuthenticator.java
-│   │   └── HumifortisRBAAuthenticatorFactory.java
+│   │   ├── HumifortisDeviceCollectorAuthenticator.java  ← device step (after the password)
+│   │   ├── DeviceSignals.java                       ← reads/validates device signals (all paths)
+│   │   ├── HumifortisRiskAuthenticator.java         ← asks Humifortis for the decision
+│   │   ├── HumifortisRiskEvaluator.java
+│   │   ├── HumifortisStepUpRouter.java / HumifortisHighCondition.java / HumifortisRiskCondition.java
+│   │   └── *Factory.java
 │   ├── client/
 │   │   ├── SaasClient.java
 │   │   ├── SaasConfig.java
@@ -284,6 +296,10 @@ humifortis-keycloak-connector/
 │   └── model/
 │       ├── RiskDecision.java
 │       └── HumifortisEvent.java
+├── src/main/resources/theme-resources/        ← served to EVERY login theme
+│   ├── resources/js/humifortis-device.bundle.js ← device collector script (built from device-collector-ui/)
+│   └── templates/*.ftl
+├── device-collector-ui/                       ← source of the collector script (npm run build)
 └── pom.xml
 ```
 

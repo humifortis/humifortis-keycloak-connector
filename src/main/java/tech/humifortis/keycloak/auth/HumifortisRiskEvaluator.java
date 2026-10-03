@@ -142,6 +142,7 @@ public class HumifortisRiskEvaluator {
             event.entity_id   = entityId;
             event.entity_type = "user"; // must match entity_type sent by HumifortisEventListener so /evaluate reads the same Redis risk key as /events
             event.event_type  = "auth_credential_verified"; // credentials confirmed; session NOT yet established
+            event.source      = "keycloak"; // provenance of every extracted feature (same as HumifortisEventListener)
             event.timestamp   = Instant.now().toString();
             event.flow_id     = flowId; // propagate Keycloak auth session id — groups with enforcement events
             event.metadata    = buildMetadata(realm, knownUser);
@@ -653,6 +654,7 @@ public class HumifortisRiskEvaluator {
         public String              entity_id;
         public String              entity_type;
         public String              event_type;
+        public String              source;
         public String              timestamp;
         public String              flow_id;   // Keycloak auth session id — groups all events of one login attempt
         public Map<String, Object> metadata;

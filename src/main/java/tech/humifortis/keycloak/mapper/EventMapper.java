@@ -1,5 +1,6 @@
 package tech.humifortis.keycloak.mapper;
 
+import tech.humifortis.keycloak.auth.DeviceSignals;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
@@ -327,20 +328,11 @@ public class EventMapper {
         putIfPresent(humiEvent, details, "user_agent");
         putIfPresent(humiEvent, details, "remember_me");
 
-        // Device fingerprint — collected by HumifortisDeviceCollectorAuthenticator
-        // device_signals (raw JSON) is intentionally excluded here: too large for the event payload,
-        // it is sent directly to /evaluate by HumifortisRiskEvaluator.
-        putIfPresent(humiEvent, details, "device_id");
-        putIfPresent(humiEvent, details, "device_tz");
-        putIfPresent(humiEvent, details, "device_screen");
-        putIfPresent(humiEvent, details, "device_lang");
-        putIfPresent(humiEvent, details, "device_color_depth");
-        putIfPresent(humiEvent, details, "device_cpu_cores");
-        putIfPresent(humiEvent, details, "device_memory_gb");
-        putIfPresent(humiEvent, details, "device_touch");
-        putIfPresent(humiEvent, details, "device_platform");
-        putIfPresent(humiEvent, details, "device_connection");
-        putIfPresent(humiEvent, details, "device_load_ms");
+        // Device signals — the field list lives in DeviceSignals (one source of truth). The raw
+        // device_signals component map is not forwarded here (it goes to /evaluate).
+        for (String field : DeviceSignals.EVENT_FIELDS) {
+            putIfPresent(humiEvent, details, field);
+        }
 
         // GeoIP fields — resolved server-side by humifortis-core (raw IP forwarded as-is by connector)
         // Normalize: accept both "country" and "geo_country" from different integrations
@@ -391,28 +383,6 @@ public class EventMapper {
 
         // Identity provider — federated vs local login context
         putIfPresent(humiEvent, details, "identity_provider");
-
-        // FP hash — SHA-256 of full FP components JSON, cross-login drift detection
-        putIfPresent(humiEvent, details, "device_fp_hash");
-
-        // Anti-replay binding result: valid | stale | mismatch | absent | error (server-validated)
-        putIfPresent(humiEvent, details, "device_binding_result");
-
-        // GPU — hard to spoof, strong device class signal (T2/T3)
-        putIfPresent(humiEvent, details, "device_webgl_vendor");
-        putIfPresent(humiEvent, details, "device_webgl_renderer");
-
-        // v2.2 passive discriminators
-        putIfPresent(humiEvent, details, "device_touch_points");
-        putIfPresent(humiEvent, details, "device_orientation");
-        putIfPresent(humiEvent, details, "device_hash_perf_ms");
-
-        // v2.3 Math/FPU fingerprint — anti-VM, anti-spoof signals
-        putIfPresent(humiEvent, details, "device_math_hash");
-        putIfPresent(humiEvent, details, "device_fpu_class");
-        putIfPresent(humiEvent, details, "device_math_anomaly");
-        putIfPresent(humiEvent, details, "device_math_exec_ms");
-        putIfPresent(humiEvent, details, "device_math_consistency");
     }
 
     private void putIfPresent(

@@ -47,7 +47,7 @@ Save
 **Add to Auth Flow:**
 ```
 Authentication → Flows → Browser → Add Step
-Select: "Humifortis Risk-Based Authentication"
+Select: "Humifortis Risk Authenticator" (after "Humifortis Device Collector" — see INSTALLATION.md, Step 6)
 Place after: "Username Password Form"
 Requirement: REQUIRED
 Save

@@ -9,46 +9,33 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.UUID;
 
 /**
- * Device Collector Authenticator — transparent step that runs immediately after the
- * Username/Password form.
+ * Device Collector — the flow step that gathers the browser's device signals, right after the
+ * username/password form. It works with any login theme and never blocks a login.
  *
- * <h3>Mechanism</h3>
+ * <h3>Two ways the signals arrive (see {@link DeviceSignals})</h3>
  * <ol>
- *   <li>{@code authenticate()} generates a session-scoped nonce, stores it as an AuthNote,
- *       and embeds it in the FTL template as {@code ${deviceNonce}}. The nonce enables
- *       anti-replay binding validation in {@code action()}.</li>
- *   <li>The JS bundle runs, collects device signals, computes
- *       {@code binding = SHA-256(nonce:timestamp:visitorId)}, and auto-submits.</li>
- *   <li>{@code action()} validates the binding server-side (recomputes and compares),
- *       then stores all signals as AuthNotes for downstream SPI.</li>
+ *   <li><b>Default:</b> this step renders a short auto-submitting page
+ *       ({@code humifortis-device-collector.ftl}) that runs {@code humifortis-device.bundle.js}
+ *       and posts the {@code device_*} fields to {@link #action}.</li>
+ *   <li><b>Opt-in, recommended:</b> the login theme loads the same script on the login page
+ *       ({@code scripts=js/humifortis-device.bundle.js} in its theme.properties). The fields then
+ *       come with the username/password POST: this step stores them and continues WITHOUT any
+ *       extra page — and a failed login carries them too (see HumifortisEventListener).</li>
  * </ol>
  *
- * <h3>Anti-replay binding (v2.1)</h3>
- * <ul>
- *   <li>Each page load gets a unique UUID nonce → captured POST bodies cannot be replayed.</li>
- *   <li>Timestamp delta check (MAX_COLLECTOR_AGE_MS) → stale submissions rejected.</li>
- *   <li>Binding ties device_id to the nonce → tampering after collection is detectable.</li>
- *   <li>Binding result stored as {@link #NOTE_BINDING_RESULT} for downstream scoring.</li>
- * </ul>
- *
- * <h3>Resilience</h3>
- * <ul>
- *   <li>Binding failure is NEVER blocking — recorded but flow always continues (fail-open).</li>
- *   <li>JS disabled → safety timer submits empty form → flow continues normally.</li>
- * </ul>
+ * <h3>Anti-replay binding</h3>
+ * {@code binding = SHA-256(nonce:timestamp:visitorId)}, recomputed server-side. The nonce is a
+ * UUID rendered into the collector page, or the auth session's tab id on the login page. The
+ * verdict (valid | stale | mismatch | absent | error) is stored as {@link #NOTE_BINDING_RESULT}
+ * and scored by Humifortis Core; it never blocks authentication.
  */
 public class HumifortisDeviceCollectorAuthenticator implements Authenticator {
 
     private static final Logger logger =
             Logger.getLogger(HumifortisDeviceCollectorAuthenticator.class);
-
-    /** Maximum age (ms) between nonce issuance and form submission. */
-    private static final long MAX_COLLECTOR_AGE_MS = 30_000L;
 
     // ── AuthNote keys ─────────────────────────────────────────────────────────
 
@@ -127,234 +114,56 @@ public class HumifortisDeviceCollectorAuthenticator implements Authenticator {
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
-        // Generate a session-scoped UUID nonce for anti-replay binding.
-        // The nonce is embedded in the FTL as ${deviceNonce} and read by the JS bundle.
-        // action() recomputes SHA-256(nonce:timestamp:visitorId) and compares with submitted binding.
+        // Opt-in path: the login page already ran the collector script, so its signals came with
+        // the username/password POST that is being processed right now — no extra page.
+        DeviceSignals fromLogin = DeviceSignals.fromForm(formOf(context));
+        if (fromLogin != null) {
+            store(context, fromLogin, fromLogin.validateBinding(context.getAuthenticationSession().getTabId(), System.currentTimeMillis()), "login page");
+            context.success();
+            return;
+        }
+
+        // Default path: render the collector page with a fresh anti-replay nonce.
         String nonce = UUID.randomUUID().toString();
-        context.getAuthenticationSession().setAuthNote(NOTE_DEVICE_NONCE,    nonce);
+        context.getAuthenticationSession().setAuthNote(NOTE_DEVICE_NONCE, nonce);
         context.getAuthenticationSession().setAuthNote(NOTE_NONCE_ISSUED_AT, String.valueOf(System.currentTimeMillis()));
-
-        logger.debugf("[DeviceCollector] authenticate — nonce=%s... realm=%s user=%s",
-                nonce.substring(0, 8),
-                context.getRealm().getName(),
-                context.getUser() != null ? context.getUser().getUsername() : "?");
-
         Response challenge = context.form()
-                .setAttribute("deviceNonce", nonce)   // → ${deviceNonce} in FTL
+                .setAttribute("deviceNonce", nonce) // →  in the template
                 .createForm(TEMPLATE);
         context.forceChallenge(challenge);
     }
 
-    // =========================================================================
-    // ACTION — validate binding, store AuthNotes, continue flow
-    // =========================================================================
-
     @Override
     public void action(AuthenticationFlowContext context) {
-        if (context.getHttpRequest() == null) {
-            logger.warnf("[DeviceCollector] action() called with null HttpRequest — skipping");
+        DeviceSignals signals = DeviceSignals.fromForm(formOf(context));
+        if (signals == null) {
+            // JavaScript disabled or the script failed: the page's safety timer posted an empty form
+            context.getAuthenticationSession().setAuthNote(NOTE_BINDING_RESULT, DeviceSignals.ABSENT);
+            logger.debugf("[DeviceCollector] no device signals submitted — continuing (fail-open)");
             context.success();
             return;
         }
-
-        MultivaluedMap<String, String> params = context.getHttpRequest().getDecodedFormParameters();
-        if (params == null) {
-            logger.warnf("[DeviceCollector] getDecodedFormParameters() returned null — skipping");
-            context.success();
-            return;
-        }
-
-        // ── STABLE
-        String deviceId          = params.getFirst("device_id");
-        String deviceSignals     = params.getFirst("device_signals");
-        String deviceFpHash      = params.getFirst("device_fp_hash");
-        // ── BINDING (v2.1)
-        String deviceTimestamp   = params.getFirst("device_timestamp");
-        String deviceBinding     = params.getFirst("device_binding");
-        // ── CONTEXTUAL
-        String deviceTz          = params.getFirst("device_tz");
-        String deviceScreen      = params.getFirst("device_screen");
-        String deviceLang        = params.getFirst("device_lang");
-        String deviceColorDepth  = params.getFirst("device_color_depth");
-        // ── HARDWARE
-        String deviceCpuCores    = params.getFirst("device_cpu_cores");
-        String deviceMemoryGb    = params.getFirst("device_memory_gb");
-        String deviceTouch       = params.getFirst("device_touch");
-        String devicePlatform    = params.getFirst("device_platform");
-        String deviceConnection  = params.getFirst("device_connection");
-        // ── GPU
-        String deviceWebglVendor   = params.getFirst("device_webgl_vendor");
-        String deviceWebglRenderer = params.getFirst("device_webgl_renderer");
-        // ── BEHAVIORAL
-        String deviceLoadMs      = params.getFirst("device_load_ms");
-        // ── PASSIVE DISCRIMINATORS (v2.2)
-        String deviceTouchPoints = params.getFirst("device_touch_points");
-        String deviceOrientation = params.getFirst("device_orientation");
-        String deviceHashPerfMs  = params.getFirst("device_hash_perf_ms");
-        // ── MATH / FPU METRICS (v2.3)
-        String deviceMathHash        = params.getFirst("device_math_hash");
-        String deviceFpuClass        = params.getFirst("device_fpu_class");
-        String deviceMathAnomaly     = params.getFirst("device_math_anomaly");
-        String deviceMathExecMs      = params.getFirst("device_math_exec_ms");
-        String deviceMathConsistency = params.getFirst("device_math_consistency");
-
-        // ── ANTI-REPLAY BINDING VALIDATION ───────────────────────────────────
-        // Recompute binding server-side from the stored nonce + submitted timestamp + deviceId.
-        // Result is stored as NOTE_BINDING_RESULT and sent to /evaluate via RiskEvaluator.
-        // NEVER blocks authentication — always fail-open.
-        String bindingResult = validateBinding(context, deviceTimestamp, deviceBinding, deviceId);
-
-        // ── STORE ALL SIGNALS AS AUTH NOTES ──────────────────────────────────
-        setNote(context, NOTE_DEVICE_ID,             deviceId);
-        setNote(context, NOTE_DEVICE_SIGNALS,        deviceSignals);
-        setNote(context, NOTE_DEVICE_FP_HASH,        deviceFpHash);
-        setNote(context, NOTE_DEVICE_BINDING,        deviceBinding);
-        setNote(context, NOTE_DEVICE_TIMESTAMP,      deviceTimestamp);
-        setNote(context, NOTE_DEVICE_TZ,             deviceTz);
-        setNote(context, NOTE_DEVICE_SCREEN,         deviceScreen);
-        setNote(context, NOTE_DEVICE_LANG,           deviceLang);
-        setNote(context, NOTE_DEVICE_COLOR_DEPTH,    deviceColorDepth);
-        setNote(context, NOTE_DEVICE_CPU_CORES,      deviceCpuCores);
-        setNote(context, NOTE_DEVICE_MEMORY_GB,      deviceMemoryGb);
-        setNote(context, NOTE_DEVICE_TOUCH,          deviceTouch);
-        setNote(context, NOTE_DEVICE_PLATFORM,       devicePlatform);
-        setNote(context, NOTE_DEVICE_CONNECTION,     deviceConnection);
-        setNote(context, NOTE_DEVICE_WEBGL_VENDOR,   deviceWebglVendor);
-        setNote(context, NOTE_DEVICE_WEBGL_RENDERER, deviceWebglRenderer);
-        setNote(context, NOTE_DEVICE_LOAD_MS,        deviceLoadMs);
-        setNote(context, NOTE_DEVICE_TOUCH_POINTS,       deviceTouchPoints);
-        setNote(context, NOTE_DEVICE_ORIENTATION,        deviceOrientation);
-        setNote(context, NOTE_DEVICE_HASH_PERF_MS,       deviceHashPerfMs);
-        setNote(context, NOTE_DEVICE_MATH_HASH,          deviceMathHash);
-        setNote(context, NOTE_DEVICE_FPU_CLASS,          deviceFpuClass);
-        setNote(context, NOTE_DEVICE_MATH_ANOMALY,       deviceMathAnomaly);
-        setNote(context, NOTE_DEVICE_MATH_EXEC_MS,       deviceMathExecMs);
-        setNote(context, NOTE_DEVICE_MATH_CONSISTENCY,   deviceMathConsistency);
-        // Binding result is always set (even "absent") so downstream SPI can read it
-        context.getAuthenticationSession().setAuthNote(NOTE_BINDING_RESULT, bindingResult);
-
-        // ── EVENT DETAILS (survives auth session close) ───────────────────────
-        if (context.getEvent() != null) {
-            eventDetail(context, "device_id",             deviceId);
-            eventDetail(context, "device_binding_result", bindingResult);
-            eventDetail(context, "device_fp_hash",        deviceFpHash);
-            eventDetail(context, "device_tz",             deviceTz);
-            eventDetail(context, "device_screen",         deviceScreen);
-            eventDetail(context, "device_lang",           deviceLang);
-            eventDetail(context, "device_color_depth",    deviceColorDepth);
-            eventDetail(context, "device_cpu_cores",      deviceCpuCores);
-            eventDetail(context, "device_memory_gb",      deviceMemoryGb);
-            eventDetail(context, "device_touch",          deviceTouch);
-            eventDetail(context, "device_platform",       devicePlatform);
-            eventDetail(context, "device_connection",     deviceConnection);
-            eventDetail(context, "device_webgl_vendor",   deviceWebglVendor);
-            eventDetail(context, "device_webgl_renderer", deviceWebglRenderer);
-            eventDetail(context, "device_load_ms",        deviceLoadMs);
-            eventDetail(context, "device_touch_points",      deviceTouchPoints);
-            eventDetail(context, "device_orientation",       deviceOrientation);
-            eventDetail(context, "device_hash_perf_ms",      deviceHashPerfMs);
-            eventDetail(context, "device_math_hash",         deviceMathHash);
-            eventDetail(context, "device_fpu_class",         deviceFpuClass);
-            eventDetail(context, "device_math_anomaly",      deviceMathAnomaly);
-            eventDetail(context, "device_math_consistency",  deviceMathConsistency);
-        }
-
-        logger.debugf("[DeviceCollector] collected — device_id=%s binding=%s platform=%s cpu=%s webgl=%s load_ms=%s",
-                nvl(deviceId, "(none)"), bindingResult,
-                nvl(devicePlatform, "?"), nvl(deviceCpuCores, "?"),
-                nvl(deviceWebglVendor, "?"), nvl(deviceLoadMs, "?"));
-
+        String nonce = context.getAuthenticationSession().getAuthNote(NOTE_DEVICE_NONCE);
+        store(context, signals, signals.validateBinding(nonce, System.currentTimeMillis()), "collector page");
         context.success();
     }
 
-    // =========================================================================
-    // ANTI-REPLAY BINDING VALIDATION
-    // =========================================================================
+    private void store(AuthenticationFlowContext context, DeviceSignals signals, String binding, String via) {
+        signals.storeAsNotes(context.getAuthenticationSession(), binding);
+        if (context.getEvent() != null) {
+            signals.writeEventDetails((k, v) -> context.getEvent().detail(k, v), binding, false);
+        }
+        logger.debugf("[DeviceCollector] device signals from the %s — device_id=%s binding=%s", via, signals.deviceId(), binding);
+    }
 
-    /**
-     * Validates the anti-replay binding submitted by the JS collector.
-     *
-     * <p>Algorithm:
-     * <pre>
-     *   expected = SHA-256(server_nonce + ":" + client_timestamp_ms + ":" + device_id)
-     *   valid if: expected == submitted_binding AND |server_now - client_ts| &lt; 30s
-     * </pre>
-     *
-     * <p>Returns one of: {@code "valid"} | {@code "stale"} | {@code "mismatch"} |
-     * {@code "absent"} | {@code "error"}
-     *
-     * <p>NEVER throws — binding failure is always fail-open.
-     */
-    private String validateBinding(AuthenticationFlowContext context,
-                                   String timestampMs, String submittedBinding, String deviceId) {
+    private static MultivaluedMap<String, String> formOf(AuthenticationFlowContext context) {
         try {
-            if (!notBlank(submittedBinding) || !notBlank(timestampMs)) return "absent";
-
-            String storedNonce  = context.getAuthenticationSession().getAuthNote(NOTE_DEVICE_NONCE);
-            if (!notBlank(storedNonce)) return "error";
-
-            long clientTs  = Long.parseLong(timestampMs);
-            long serverNow = System.currentTimeMillis();
-            if (Math.abs(serverNow - clientTs) > MAX_COLLECTOR_AGE_MS) {
-                logger.debugf("[DeviceCollector] binding stale — delta=%dms", Math.abs(serverNow - clientTs));
-                return "stale";
-            }
-
-            // Recompute: SHA-256(nonce:timestamp:visitorId)  — same formula as JS
-            String input    = storedNonce + ":" + timestampMs + ":" + nvl(deviceId, "");
-            String expected = sha256Hex(input);
-            if (expected == null) return "error";
-
-            boolean valid = expected.equalsIgnoreCase(submittedBinding);
-            logger.debugf("[DeviceCollector] binding %s — delta=%dms",
-                    valid ? "VALID" : "MISMATCH", Math.abs(serverNow - clientTs));
-            return valid ? "valid" : "mismatch";
-
-        } catch (NumberFormatException e) {
-            logger.debugf("[DeviceCollector] binding timestamp parse error: %s", e.getMessage());
-            return "error";
+            if (context.getHttpRequest() == null) return null;
+            if (!"POST".equalsIgnoreCase(context.getHttpRequest().getHttpMethod())) return null;
+            return context.getHttpRequest().getDecodedFormParameters();
         } catch (Exception e) {
-            logger.debugf("[DeviceCollector] binding validation error: %s", e.getMessage());
-            return "error";
+            return null; // not a form request — fail-open
         }
-    }
-
-    /**
-     * Computes SHA-256 of the input string and returns lowercase hex.
-     * Returns null if MessageDigest fails (should never happen in practice).
-     */
-    private static String sha256Hex(String input) {
-        try {
-            MessageDigest md   = MessageDigest.getInstance("SHA-256");
-            byte[]         hash = md.digest(input.getBytes(StandardCharsets.UTF_8));
-            StringBuilder  sb   = new StringBuilder(hash.length * 2);
-            for (byte b : hash) sb.append(String.format("%02x", b));
-            return sb.toString();
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    // =========================================================================
-    // HELPERS
-    // =========================================================================
-
-    private void setNote(AuthenticationFlowContext context, String key, String value) {
-        if (notBlank(value)) {
-            context.getAuthenticationSession().setAuthNote(key, value);
-        }
-    }
-
-    private void eventDetail(AuthenticationFlowContext context, String key, String value) {
-        if (notBlank(value)) {
-            context.getEvent().detail(key, value);
-        }
-    }
-
-    private static boolean notBlank(String s) { return s != null && !s.isBlank(); }
-
-    private static String nvl(String value, String fallback) {
-        return notBlank(value) ? value : fallback;
     }
 
     // =========================================================================

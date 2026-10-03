@@ -20,7 +20,7 @@ import org.keycloak.models.UserModel;
  *         └── OTP Form (REQUIRED) — only executes if condition = true
  *
  * This condition reads the risk decision stored in auth session notes
- * by the HumifortisRBAAuthenticator and returns true if step-up auth
+ * by the HumifortisRiskAuthenticator and returns true if step-up auth
  * is required (REQUIRE_MFA or REQUIRE_WEBAUTHN).
  */
 public class HumifortisRiskCondition implements ConditionalAuthenticator {

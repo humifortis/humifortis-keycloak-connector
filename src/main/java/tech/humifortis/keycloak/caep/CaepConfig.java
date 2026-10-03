@@ -14,9 +14,20 @@ public record CaepConfig(
         boolean supportAssuranceLevelChange,
         boolean enforceSessionRevoked,
         boolean enforceStepUp,
-        boolean enforceStepUpAsReauth
+        boolean enforceStepUpAsReauth,
+        boolean enforceAccountDisabled,
+        boolean enforceCredentialCompromise
 ) {
     public static final String PREFIX = "hf.caep.";
+
+    /** Session and step-up settings only: accounts are never locked or reset unless enabled. */
+    public CaepConfig(boolean enabled, String issuer, String audience, String jwksUri, int clockSkewSeconds,
+                      boolean replayEnabled, int replayTtlSeconds, boolean supportSessionRevoked,
+                      boolean supportAssuranceLevelChange, boolean enforceSessionRevoked, boolean enforceStepUp,
+                      boolean enforceStepUpAsReauth) {
+        this(enabled, issuer, audience, jwksUri, clockSkewSeconds, replayEnabled, replayTtlSeconds, supportSessionRevoked,
+                supportAssuranceLevelChange, enforceSessionRevoked, enforceStepUp, enforceStepUpAsReauth, false, false);
+    }
 
     public static CaepConfig fromRealm(RealmModel realm) {
         return new CaepConfig(
@@ -31,7 +42,10 @@ public record CaepConfig(
                 getBool(realm, "supported.assuranceLevelChange", true),
                 getBool(realm, "enforce.sessionRevoked", true),
                 getBool(realm, "enforce.stepUp", true),
-                getBool(realm, "enforce.stepUpAsReauth", false)
+                getBool(realm, "enforce.stepUpAsReauth", false),
+                // an analyst response that changes the account: opt in per realm
+                getBool(realm, "enforce.accountDisabled", false),
+                getBool(realm, "enforce.credentialCompromise", false)
         );
     }
 

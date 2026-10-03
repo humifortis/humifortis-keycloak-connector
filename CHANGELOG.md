@@ -5,6 +5,33 @@ All notable changes to the Humifortis Keycloak Connector will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Device signals on **failed logins**: add `scripts=js/humifortis-device.bundle.js` to the login
+  theme's `theme.properties` (one line, any theme) and the device is collected on the login page
+  itself — failed attempts carry it, which lets Humifortis detect one device trying several
+  accounts. The short page after the password disappears. Optional; the flow is unchanged.
+- Analyst responses from the Humifortis alert page, enforced here: RISC `account-disabled` (lock the
+  account) and `credential-compromise` (require a new password), next to the existing CAEP
+  `session-revoked`. **Opt-in per realm** (`hf.caep.enforce.accountDisabled`,
+  `hf.caep.enforce.credentialCompromise`, both off by default); the receiver replies with what it did
+  or why it did not.
+
+### Fixed
+- The device-collector script is served to **every** login theme (it ships in the jar's
+  `theme-resources`). Before, a realm not using the `humifortis` theme got a 404 for the script
+  and no device signals.
+- `auth_credential_verified` events now carry `source: keycloak`.
+
+### Changed
+- Deployment is the jar only: no file to copy into a theme.
+- Device signals are read and validated in one place (`DeviceSignals`) for every path.
+
+### Removed
+- `login.ftl.snippet` (superseded by the one-line theme setting) and the unused
+  `HumifortisRBAAuthenticator` class.
+
 ## [1.0.0] - 2024-12-27
 
 ### Added

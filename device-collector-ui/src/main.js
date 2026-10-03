@@ -1,5 +1,13 @@
 /**
- * Humifortis Device Collector — main entry point  v2.5
+ * Humifortis Device Collector — main entry point  v2.6
+ *
+ * v2.6 — One script, two pages (same device_* fields, same server-side validation):
+ *   - the device-collector page (flow step after the password, default): fills the page's
+ *     hidden fields and auto-submits;
+ *   - the LOGIN page (opt-in: scripts=js/humifortis-device.bundle.js in the login theme's
+ *     theme.properties): adds the fields to the username/password form, so a FAILED login
+ *     carries the device too and no extra page is shown. Never blocks the login: if collection
+ *     is not finished at submit, it waits at most LOGIN_WAIT_MS, then submits anyway.
  *
  * v2.5 — Removed localStorage UUID (spoofable). Device identity strategy:
  *
@@ -28,23 +36,18 @@
  */
 import FingerprintJS from '@fingerprintjs/fingerprintjs'
 
-const MAX_WAIT_MS  = 3000
-const PAGE_LOAD_AT = Date.now()
+const MAX_WAIT_MS   = 3000 // collector page: auto-submit deadline
+const LOGIN_WAIT_MS = 1500 // login page: longest a submit waits for an unfinished collection
+const PAGE_LOAD_AT  = Date.now()
 
-async function collect() {
-  const form = document.getElementById('kc-device-collector')
-  if (!form) return
-
-  let submitted = false
-
-  const safetyTimer = setTimeout(() => {
-    if (!submitted) {
-      submitted = true
-      console.debug('[Humifortis] Safety timer: submitting without full device data')
-      form.submit()
-    }
-  }, MAX_WAIT_MS)
-
+/**
+ * Gathers every device signal into `out` (field name → string). Never throws; a signal that
+ * cannot be read is simply left out. The anti-replay binding is computed by the caller.
+ */
+async function collectSignals(out) {
+  const setField = (id, value) => {
+    if (value != null && value !== 'undefined' && value !== 'null') out[id] = String(value)
+  }
   try {
     const fp     = await FingerprintJS.load()
     const result = await fp.get()
@@ -59,16 +62,7 @@ async function collect() {
     const signalsJson = JSON.stringify(result.components)
     const fpHash = await sha256hex(signalsJson)
     if (fpHash) setField('device_fp_hash', fpHash)
-    setField('device_signals', JSON.stringify(buildSignalsSubset(result.components)))
-
-    // ── ANTI-REPLAY BINDING ───────────────────────────────────────────────────
-    const serverNonce  = safeGet(() => document.getElementById('device_nonce')?.value) || ''
-    const collectionTs = Date.now()
-    setField('device_timestamp', String(collectionTs))
-    if (serverNonce && result.visitorId) {
-      const binding = await sha256hex(`${serverNonce}:${collectionTs}:${result.visitorId}`)
-      if (binding) setField('device_binding', binding)
-    }
+    // (the subset reads math_hash / fpu_class, computed below: it is set at the end)
 
     // ── CONTEXTUAL ────────────────────────────────────────────────────────────
     setField('device_tz',          safeGet(() => Intl.DateTimeFormat().resolvedOptions().timeZone))
@@ -190,16 +184,82 @@ async function collect() {
 
     // ── BEHAVIORAL ────────────────────────────────────────────────────────────
     setField('device_load_ms', safeGet(() => String(Date.now() - PAGE_LOAD_AT)))
-
+    setField('device_signals', JSON.stringify(buildSignalsSubset(result.components, out)))
   } catch (err) {
     console.debug('[Humifortis] FingerprintJS error (non-blocking):', err)
+  }
+  return out
+}
+
+/** Anti-replay binding: SHA-256(nonce:timestamp:visitorId), recomputed by the server. */
+async function bind(out, nonce) {
+  const ts = Date.now()
+  out.device_timestamp = String(ts)
+  if (nonce && out.device_id) {
+    const binding = await sha256hex(`${nonce}:${ts}:${out.device_id}`)
+    if (binding) out.device_binding = binding
+  }
+}
+
+/** Writes the fields into the form: existing hidden inputs, or new ones. */
+function writeFields(form, out) {
+  for (const [name, value] of Object.entries(out)) {
+    let input = form.querySelector(`input[name="${name}"]`)
+    if (!input) {
+      input = document.createElement('input')
+      input.type = 'hidden'
+      input.name = name
+      form.appendChild(input)
+    }
+    input.value = value
+  }
+}
+
+// ── The device-collector page (flow step after the password) ───────────────────
+async function runCollectorPage(form) {
+  let submitted = false
+  const submit = () => { if (!submitted) { submitted = true; form.submit() } }
+  const safetyTimer = setTimeout(() => {
+    console.debug('[Humifortis] Safety timer: submitting without full device data')
+    submit()
+  }, MAX_WAIT_MS)
+  try {
+    const out = await collectSignals({})
+    await bind(out, safeGet(() => document.getElementById('device_nonce')?.value) || '')
+    writeFields(form, out)
   } finally {
     clearTimeout(safetyTimer)
-    if (!submitted) {
-      submitted = true
-      form.submit()
-    }
+    submit()
   }
+}
+
+// ── The login page (opt-in) ────────────────────────────────────────────────────
+function runLoginPage(form) {
+  const collection = collectSignals({})
+  let ready = false
+  form.addEventListener('submit', async (event) => {
+    if (ready) return // second pass: the fields are written, let the browser post
+    event.preventDefault()
+    try {
+      const timeout = new Promise((resolve) => setTimeout(() => resolve(null), LOGIN_WAIT_MS))
+      const out = (await Promise.race([collection, timeout])) || {}
+      // nonce: the auth session tab id Keycloak puts in the form action (?tab_id=…)
+      await bind(out, safeGet(() => new URL(form.action, location.href).searchParams.get('tab_id')) || '')
+      writeFields(form, out)
+    } catch (err) {
+      console.debug('[Humifortis] device collection skipped (non-blocking):', err)
+    } finally {
+      ready = true
+      HTMLFormElement.prototype.submit.call(form) // never blocks the login
+    }
+  }, { capture: true })
+}
+
+function start() {
+  const collector = document.getElementById('kc-device-collector')
+  if (collector) return runCollectorPage(collector)
+  const login = document.getElementById('kc-form-login')
+  if (login) return runLoginPage(login)
 }
 
 /**
@@ -239,7 +299,7 @@ async function sha256hex(data) {
 /**
  * buildSignalsSubset — highest-entropy FP components, always valid JSON, always < 2 KB.
  */
-function buildSignalsSubset(components) {
+function buildSignalsSubset(components, out) {
   const c = components || {}
   return {
     canvas:        safeGet(() => c.canvas?.value         ?? null),
@@ -248,15 +308,8 @@ function buildSignalsSubset(components) {
     plugins_count: safeGet(() => Array.isArray(c.plugins?.value) ? c.plugins.value.length : null),
     webgl:         safeGet(() => c.webgl?.value          ?? null),
     color_gamut:   safeGet(() => c.colorGamut?.value     ?? null),
-    math_hash:     safeGet(() => document.getElementById('device_math_hash')?.value  || null),
-    fpu_class:     safeGet(() => document.getElementById('device_fpu_class')?.value  || null),
-  }
-}
-
-function setField(id, value) {
-  const el = document.getElementById(id)
-  if (el && value != null && value !== 'undefined' && value !== 'null') {
-    el.value = value
+    math_hash:     out.device_math_hash || null,
+    fpu_class:     out.device_fpu_class || null,
   }
 }
 
@@ -270,7 +323,7 @@ function safeGet(fn) {
 }
 
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', collect)
+  document.addEventListener('DOMContentLoaded', start)
 } else {
-  collect()
+  start()
 }

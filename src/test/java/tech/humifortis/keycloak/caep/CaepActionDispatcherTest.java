@@ -75,4 +75,91 @@ class CaepActionDispatcherTest {
         assertEquals("enforcement_failed", result.processingResult());
         assertEquals("step_up", result.action());
     }
+
+    // ── analyst responses (RISC): opt-in, they change the account ─────────────────
+
+    private static CaepConfig accountActions(boolean disabled, boolean compromise) {
+        return new CaepConfig(true, "iss", "aud", "jwks", 60, true, 600, true, true, true, true, false, disabled, compromise);
+    }
+
+    @Test
+    void accountDisabledLocksTheUserAndEndsItsSessions() {
+        KeycloakSession keycloakSession = mock(KeycloakSession.class);
+        RealmModel realm = mock(RealmModel.class);
+        UserProvider users = mock(UserProvider.class);
+        UserSessionProvider sessions = mock(UserSessionProvider.class);
+        when(keycloakSession.users()).thenReturn(users);
+        when(keycloakSession.sessions()).thenReturn(sessions);
+        UserModel user = mock(UserModel.class);
+        when(users.getUserById(realm, "user-1")).thenReturn(user);
+        UserSessionModel s1 = mock(UserSessionModel.class);
+        when(sessions.getUserSessionsStream(realm, user)).thenReturn(Stream.of(s1));
+
+        CaepParsedSet set = new CaepParsedSet("j4", "iss", Set.of("aud"), Instant.now(), Instant.now().plusSeconds(60), "user:keycloak:demo:user-1", null, new JsonObject());
+        CaepDispatchResult result = new CaepActionDispatcher(keycloakSession).dispatch(CaepEventRegistry.ACCOUNT_DISABLED, set, accountActions(true, false), realm);
+
+        verify(user).setEnabled(false);
+        verify(sessions).removeUserSession(realm, s1);
+        assertEquals("processed", result.processingResult());
+        assertEquals("account_disabled", result.action());
+    }
+
+    @Test
+    void credentialCompromiseRequiresANewPasswordAndEndsTheSessions() {
+        KeycloakSession keycloakSession = mock(KeycloakSession.class);
+        RealmModel realm = mock(RealmModel.class);
+        UserProvider users = mock(UserProvider.class);
+        UserSessionProvider sessions = mock(UserSessionProvider.class);
+        when(keycloakSession.users()).thenReturn(users);
+        when(keycloakSession.sessions()).thenReturn(sessions);
+        UserModel user = mock(UserModel.class);
+        when(users.getUserById(realm, "user-1")).thenReturn(user);
+        UserSessionModel s1 = mock(UserSessionModel.class);
+        when(sessions.getUserSessionsStream(realm, user)).thenReturn(Stream.of(s1));
+
+        CaepParsedSet set = new CaepParsedSet("j5", "iss", Set.of("aud"), Instant.now(), Instant.now().plusSeconds(60), "user-1", null, new JsonObject());
+        CaepDispatchResult result = new CaepActionDispatcher(keycloakSession).dispatch(CaepEventRegistry.CREDENTIAL_COMPROMISE, set, accountActions(false, true), realm);
+
+        verify(user).addRequiredAction(UserModel.RequiredAction.UPDATE_PASSWORD);
+        verify(sessions).removeUserSession(realm, s1);
+        assertEquals("processed", result.processingResult());
+        assertEquals("password_reset_required", result.action());
+    }
+
+    @Test
+    void accountActionsAreOffUnlessTheRealmEnablesThem() {
+        KeycloakSession keycloakSession = mock(KeycloakSession.class);
+        RealmModel realm = mock(RealmModel.class);
+        CaepParsedSet set = new CaepParsedSet("j6", "iss", Set.of("aud"), Instant.now(), Instant.now().plusSeconds(60), "user-1", null, new JsonObject());
+        CaepActionDispatcher dispatcher = new CaepActionDispatcher(keycloakSession);
+
+        CaepDispatchResult disabled = dispatcher.dispatch(CaepEventRegistry.ACCOUNT_DISABLED, set, accountActions(false, false), realm);
+        CaepDispatchResult compromise = dispatcher.dispatch(CaepEventRegistry.CREDENTIAL_COMPROMISE, set, accountActions(false, false), realm);
+
+        assertEquals("ignored", disabled.processingResult());
+        assertEquals("ignored", compromise.processingResult());
+        assertEquals(true, disabled.error().contains("hf.caep.enforce.accountDisabled"));
+        verifyNoInteractions(keycloakSession); // not even a user lookup
+    }
+
+    @Test
+    void anUnknownTargetIsIgnoredNotAnError() {
+        KeycloakSession keycloakSession = mock(KeycloakSession.class);
+        RealmModel realm = mock(RealmModel.class);
+        UserProvider users = mock(UserProvider.class);
+        when(keycloakSession.users()).thenReturn(users);
+        CaepParsedSet set = new CaepParsedSet("j7", "iss", Set.of("aud"), Instant.now(), Instant.now().plusSeconds(60), "ghost", null, new JsonObject());
+
+        CaepDispatchResult result = new CaepActionDispatcher(keycloakSession).dispatch(CaepEventRegistry.ACCOUNT_DISABLED, set, accountActions(true, false), realm);
+
+        assertEquals("ignored", result.processingResult());
+        assertEquals("target user not found", result.error());
+    }
+
+    @Test
+    void theRiscEventUrisResolve() {
+        CaepEventRegistry registry = new CaepEventRegistry();
+        assertEquals(CaepEventRegistry.ACCOUNT_DISABLED, registry.resolve("https://schemas.openid.net/secevent/risc/event-type/account-disabled"));
+        assertEquals(CaepEventRegistry.CREDENTIAL_COMPROMISE, registry.resolve("https://schemas.openid.net/secevent/risc/event-type/credential-compromise"));
+    }
 }
