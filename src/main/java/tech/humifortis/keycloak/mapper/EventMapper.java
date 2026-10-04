@@ -360,8 +360,22 @@ public class EventMapper {
         // Credential type (for MFA events)
         putIfPresent(humiEvent, details, "credential_type");
 
-        // Account age — critical for new_account_new_device scoring
+        // Account age — critical for new_account_new_device scoring; the creation time lets the
+        // server compute the age itself
         putIfPresent(humiEvent, details, "account_age_days");
+        putIfPresent(humiEvent, details, "account_created_at");
+        putIfPresent(humiEvent, details, "account_created_source");
+
+        // Groups and why the user counts as privileged (access policies scope on them)
+        putIfPresent(humiEvent, details, "user_groups");
+        putIfPresent(humiEvent, details, "user_groups_truncated");
+        putIfPresent(humiEvent, details, "user_roles_truncated");
+        putIfPresent(humiEvent, details, "privileged_reason");
+
+        // How the client IP was resolved (Keycloak's proxy configuration)
+        putIfPresent(humiEvent, details, "ip_source");
+        putIfPresent(humiEvent, details, "proxy_headers_mode");
+        putIfPresent(humiEvent, details, "proxy_trusted_addresses_set");
 
         // Email verification — required for EMAIL_OTP safety (unverified email is attackable)
         putIfPresent(humiEvent, details, "email_verified");

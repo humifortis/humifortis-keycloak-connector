@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-10-03
+
+### Added
+- **Resilient API calls**: retries with jittered exponential backoff inside a login budget
+  (`HUMIFORTIS_EVALUATE_BUDGET_MS`, default 1500 ms), one circuit breaker per endpoint (opens
+  after 5 failed calls, single half-open probe, open time doubles up to 2 min), an
+  `Idempotency-Key` / stable `event_id` on every attempt.
+- **Event queue**: Keycloak events are buffered (`HUMIFORTIS_EVENT_QUEUE_SIZE`, default 10 000)
+  and delivered once the API is back — no lost evidence during a blip.
+- **Fallback policy**: a login without a decision follows the tenant's policy (allow / step-up /
+  deny, privileged users separately), cached from every decision; `HUMIFORTIS_FALLBACK` overrides
+  it. Every fallback is reported (`auth_decision_fallback`). The denial page says
+  "temporarily unavailable" (HF-1001), not "suspicious".
+- **Identity context**: effective roles (group-inherited, composites expanded, client roles as
+  `clientId:role`), group paths, why a user is privileged (`privileged_reason`), configurable
+  privileged roles/groups (realm attributes), account creation time (`account_created_at`,
+  with an LDAP/AD attribute fallback). Collected once per request.
+- **Application on the decision**: `client_id`, `client_name` and `redirect_uri` on `/evaluate`.
+- **Client IP provenance**: `ip_source`, `proxy_headers_mode`, `proxy_trusted_addresses_set` on
+  every event; a startup warning when proxy headers are believed from any peer.
+- **WebAuthn step-up**: `REQUIRE_WEBAUTHN` runs Keycloak's WebAuthn ceremony for enrolled users.
+
+### Fixed
+- Privileged users through a group were not seen as privileged (direct role mappings only).
+- `REQUIRE_WEBAUTHN` always degraded to an email code, even for users with a passkey.
+- `is_privileged` was missing from listener events.
+- Every failure path silently allowed the login (fail-open), unreported.
+
+### Changed
+- `HUMIFORTIS_TIMEOUT_MS` is the timeout of one attempt (default 800 ms); one configuration
+  source for every component. `HUMIFORTIS_FALLBACK_ALLOW` is deprecated.
+
+### Removed
+- Unused `SaasClient` methods (`getRiskDecision`, `evaluate`, `sendBlockEventAsync`) and the
+  `RiskDecision` / `SaasException` types.
+
+## [1.0.0]
+
 ### Added
 - Device signals on **failed logins**: add `scripts=js/humifortis-device.bundle.js` to the login
   theme's `theme.properties` (one line, any theme) and the device is collected on the login page

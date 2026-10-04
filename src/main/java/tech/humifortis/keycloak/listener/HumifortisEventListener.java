@@ -16,6 +16,7 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
 
+import tech.humifortis.keycloak.client.ProxySettings;
 import tech.humifortis.keycloak.client.SaasClient;
 import tech.humifortis.keycloak.client.SaasConfig;
 import tech.humifortis.keycloak.mapper.EventMapper;
@@ -113,7 +114,7 @@ public class HumifortisEventListener implements EventListenerProvider {
         EventMapper mapper  = null;
         boolean     isDisabled = false;
         try {
-            SaasConfig config = new SaasConfig();
+            SaasConfig config = SaasConfig.fromEnv();
             client  = new SaasClient(config);
             mapper  = new EventMapper();
             logger.info("[HumifortisEventListener] Initialized (lean mode — server-side enrichment)");
@@ -234,6 +235,12 @@ public class HumifortisEventListener implements EventListenerProvider {
         } catch (Exception e) {
             logger.debugf("[HumifortisEventListener] IP extraction failed: %s", e.getMessage());
         }
+        // how that IP was resolved (trusted proxy configuration or not)
+        try {
+            ProxySettings.current().writeTo((k, v) -> event.getDetails().put(k, v));
+        } catch (Exception e) {
+            logger.debugf("[HumifortisEventListener] proxy settings failed: %s", e.getMessage());
+        }
 
         // Step 2 — Raw User-Agent (only accessible here via HTTP headers)
         try {
@@ -296,46 +303,13 @@ public class HumifortisEventListener implements EventListenerProvider {
 
         UserContextSnapshot userContext = resolveUserContext(event);
 
-        // Step 4 — Account age (requires UserModel)
+        // Step 4 — Identity: effective roles, groups, privilege, account creation, MFA, sessions
         try {
             if (userContext != null) {
-                if (userContext.accountAgeDays() != null) {
-                    event.getDetails().put("account_age_days", String.valueOf(userContext.accountAgeDays()));
-                }
-                event.getDetails().put("email_verified", String.valueOf(userContext.emailVerified()));
-                if (!userContext.mfaMethods().isEmpty()) {
-                    event.getDetails().put("mfa_methods", String.join(",", userContext.mfaMethods()));
-                }
+                userContext.writeTo((k, v) -> event.getDetails().put(k, v));
             }
         } catch (Exception e) {
-            logger.warnf("[HumifortisEventListener] account_age_days failed: %s", e.getMessage());
-        }
-
-        // Step 5 — Roles (requires UserModel + RoleModel)
-        try {
-            if (userContext != null && !userContext.roleNames().isEmpty()) {
-                event.getDetails().put("user_roles", String.join(",", userContext.roleNames()));
-            }
-        } catch (Exception e) {
-            logger.debugf("[HumifortisEventListener] roles extraction failed: %s", e.getMessage());
-        }
-
-        // Step 6 — MFA enrolled (requires credential manager)
-        try {
-            if (userContext != null) {
-                event.getDetails().put("mfa_enrolled", String.valueOf(userContext.mfaEnrolled()));
-            }
-        } catch (Exception e) {
-            logger.debugf("[HumifortisEventListener] mfa_enrolled failed: %s", e.getMessage());
-        }
-
-        // Step 7 — Active session count (requires session provider)
-        try {
-            if (userContext != null) {
-                event.getDetails().put("active_session_count", String.valueOf(userContext.activeSessionCount()));
-            }
-        } catch (Exception e) {
-            logger.debugf("[HumifortisEventListener] session_count failed: %s", e.getMessage());
+            logger.warnf("[HumifortisEventListener] identity context failed: %s", e.getMessage());
         }
 
         // Step 8 — Identity provider
@@ -566,13 +540,7 @@ public class HumifortisEventListener implements EventListenerProvider {
         try {
             UserContextSnapshot userContext = resolveUserContext(event);
             if (userContext != null) {
-                if (userContext.accountAgeDays() != null) {
-                    feedback.addMetadata("account_age_days", String.valueOf(userContext.accountAgeDays()));
-                }
-                feedback.addMetadata("email_verified", String.valueOf(userContext.emailVerified()));
-                if (!userContext.mfaMethods().isEmpty()) {
-                    feedback.addMetadata("mfa_methods", String.join(",", userContext.mfaMethods()));
-                }
+                userContext.writeTo(feedback::addMetadata);
             }
         } catch (Exception e) {
             logger.debugf("[HumifortisEventListener] identity enrichment in feedback failed: %s",
@@ -590,12 +558,11 @@ public class HumifortisEventListener implements EventListenerProvider {
     // ── Shared helpers ────────────────────────────────────────────────────────
 
     private void sendAsync(HumifortisEvent event, String label) {
-        saasClient.sendEventAsync(event)
-                .exceptionally(ex -> {
-                    logger.warnf("[HumifortisEventListener] Failed to send [%s]: %s",
-                            label, ex.getMessage());
-                    return null;
-                });
+        try {
+            saasClient.send(event);
+        } catch (RuntimeException e) {
+            logger.warnf("[HumifortisEventListener] Failed to queue [%s]: %s", label, e.getMessage());
+        }
     }
 
     private String detail(Event event, String key) {

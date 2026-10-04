@@ -83,8 +83,9 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
 |----------|----------|---------|-------------|
 | `HUMIFORTIS_API_URL` | No | `https://api.humifortis.educosmic.tech` | Humifortis SaaS API endpoint |
 | `HUMIFORTIS_API_KEY` | **Yes** | - | API key from SaaS connector registration |
-| `HUMIFORTIS_TIMEOUT_MS` | No | `5000` | HTTP request timeout in milliseconds |
-| `HUMIFORTIS_FALLBACK_ALLOW` | No | `true` | Allow/block access if SaaS is unreachable |
+| `HUMIFORTIS_TIMEOUT_MS` | No | `800` | Timeout of one API attempt (ms) |
+| `HUMIFORTIS_EVALUATE_BUDGET_MS` | No | `1500` | Longest a login waits for a decision, retries included (ms) |
+| `HUMIFORTIS_FALLBACK` | No | (tenant policy) | `allow` \| `step_up` \| `deny` when Humifortis cannot answer — overrides the tenant policy (see INSTALLATION.md, Resilience) |
 | `HF_CAEP_ENABLED` | No | `false` | Enable CAEP/SSF receiver (`POST /realms/{realm}/ssf/caep/events`) |
 | `HF_CAEP_ISSUER` | No | - | Trusted Humifortis SET issuer (`iss`) |
 | `HF_CAEP_AUDIENCE` | No | - | Expected audience (`aud`) |
@@ -109,8 +110,7 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
 
 # Optional
 export HUMIFORTIS_API_URL=https://api.humifortis.educosmic.tech
-export HUMIFORTIS_TIMEOUT_MS=5000
-export HUMIFORTIS_FALLBACK_ALLOW=true
+export HUMIFORTIS_TIMEOUT_MS=800
 
 # Optional CAEP/SSF receiver
 export HF_CAEP_ENABLED=true

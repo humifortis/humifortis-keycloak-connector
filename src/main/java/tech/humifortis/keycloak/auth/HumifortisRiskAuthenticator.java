@@ -11,10 +11,16 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import tech.humifortis.keycloak.HumifortisError;
+import tech.humifortis.keycloak.client.EventQueue;
+import tech.humifortis.keycloak.client.SaasConfig;
+import tech.humifortis.keycloak.model.HumifortisEvent;
 import tech.humifortis.keycloak.model.Risk;
+import tech.humifortis.keycloak.user.UserContextExtractor;
+import tech.humifortis.keycloak.user.UserContextSnapshot;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 
 /**
  * Risk-based authenticator — thin enforcement layer driven by the Humifortis Core server.
@@ -131,9 +137,9 @@ public class HumifortisRiskAuthenticator implements Authenticator {
             playbookRule = nvl(serverDecision.playbook_rule, "");
             actions      = serverDecision.actions != null ? serverDecision.actions : List.of();
         } else {
-            // Server unreachable — derive from local Risk object
+            // No answer from Humifortis: the fallback policy decides (never a silent allow)
             riskLevel    = deriveLevel(risk);
-            serverAction = deriveAction(risk);
+            serverAction = applyFallback(context, evaluation.fallbackReason(), flowId);
         }
 
         logger.debugf("[HumifortisRiskAuthenticator] action=%s level=%s rule=%s",
@@ -160,7 +166,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         fireRiskDecisionEvent(context, risk, serverAction, riskLevel, playbookRule, serverDecision);
 
         // Step 5 — enforce (or simulate in dry_run / shadow mode)
-        String mode = resolveMode(serverDecision);
+        String mode = serverDecision != null ? resolveMode(serverDecision) : resolveFallbackMode(context);
         if ("dry_run".equals(mode) || "shadow".equals(mode)) {
             logger.infof("[HumifortisRiskAuthenticator] %s mode: would=%s, actual=ALLOW (user=%s rule=%s)",
                     mode, serverAction,
@@ -207,11 +213,13 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                 logger.warnf("[HumifortisRiskAuthenticator] DENY — %s", risk.getReason().orElse(""));
                 context.getAuthenticationSession().setAuthNote(NOTE_RISK_BLOCKED, "true");
                 executeSideActions(context, "DENY", actions, serverDecision);
+                // a fallback denial says "unavailable", never "suspicious": nothing was evaluated
+                HumifortisError err = serverDecision == null ? HumifortisError.SERVICE_TIMEOUT : HumifortisError.ACCESS_DENIED_RISK;
                 context.failure(AuthenticationFlowError.ACCESS_DENIED,
                         context.form()
-                                .setAttribute("hfErrorCode",       HumifortisError.ACCESS_DENIED_RISK.code)
-                                .setAttribute("hfErrorMessageKey",  HumifortisError.ACCESS_DENIED_RISK.messageKey())
-                                .setAttribute("hfErrorDetailKey",   HumifortisError.ACCESS_DENIED_RISK.messageDetailKey())
+                                .setAttribute("hfErrorCode",       err.code)
+                                .setAttribute("hfErrorMessageKey",  err.messageKey())
+                                .setAttribute("hfErrorDetailKey",   err.messageDetailKey())
                                 .setAttribute("hfTimestamp",        java.time.Instant.now().toString())
                                 .createForm("humifortis-error.ftl"));
             }
@@ -546,13 +554,80 @@ public class HumifortisRiskAuthenticator implements Authenticator {
     // FALLBACK (server unreachable)
     // =========================================================================
 
-    private static String deriveAction(Risk risk) {
-        if (risk.getScore() == null) return "ALLOW";
-        return switch (risk.getScore()) {
-            case NONE, VERY_SMALL, INVALID, NEGATIVE_HIGH, NEGATIVE_LOW -> "ALLOW";
-            case SMALL, MEDIUM, HIGH -> "REQUIRE_MFA";
-            case VERY_HIGH, EXTREME  -> "DENY";
+    /** Auth note: why this login was decided without Humifortis (neutral text in the UI). */
+    public static final String NOTE_FALLBACK_REASON = "hf.fallback.reason";
+
+    /**
+     * Decides a login Humifortis could not answer with the fallback policy, and reports it
+     * (queued: it reaches Humifortis when the API is back, so the SOC sees every such login).
+     */
+    private String applyFallback(AuthenticationFlowContext context, String reason, String flowId) {
+        UserModel user = context.getUser();
+        RealmModel realm = context.getRealm();
+        SaasConfig config = SaasConfig.fromEnv();
+        String tenantId = config.tenantIdOr(realm.getName());
+        UserContextSnapshot snapshot = null;
+        try {
+            if (user != null) snapshot = new UserContextExtractor().extract(context.getSession(), realm, user);
+        } catch (RuntimeException e) {
+            logger.debugf("[HumifortisRiskAuthenticator] user context for fallback failed: %s", e.getMessage());
+        }
+        boolean privileged = snapshot != null && snapshot.privileged();
+        boolean emailOtp = user != null && user.isEmailVerified() && user.getEmail() != null && !user.getEmail().isBlank();
+        boolean canStepUp = (snapshot != null && snapshot.mfaEnrolled()) || emailOtp;
+        FallbackPolicy.Decision d = FallbackPolicy.resolve(config.getFallbackOverride(), tenantId, privileged, canStepUp);
+
+        String action = fallbackAction(d.outcome(), snapshot != null ? snapshot.mfaMethods() : List.of());
+        String why = reason != null ? reason : "error";
+        context.getAuthenticationSession().setAuthNote(NOTE_FALLBACK_REASON, why);
+        logger.infof("[Humifortis] fallback applied: outcome=%s source=%s reason=%s privileged=%s user=%s",
+                d.outcome().wire(), d.source(), why, privileged, user != null ? user.getUsername() : "?");
+
+        if (config.hasApiKey() && user != null) {
+            try {
+                HumifortisEvent ev = new HumifortisEvent();
+                ev.setEventId(UUID.randomUUID().toString());
+                ev.setEntityId(HumifortisRiskEvaluator.buildEntityId(realm, user));
+                ev.setEntityType("user");
+                ev.setEventType("auth_decision_fallback");
+                ev.setSource("keycloak-rba");
+                ev.setTimestamp(java.time.Instant.now().toString());
+                ev.setFlowId(flowId);
+                ev.addMetadata("fallback_reason", why);
+                ev.addMetadata("fallback_outcome", d.outcome().wire());
+                ev.addMetadata("fallback_policy_source", d.source());
+                ev.addMetadata("fallback_action", action);
+                if (d.stepUpUnavailable()) ev.addMetadata("fallback_step_up_unavailable", "true");
+                ev.addMetadata("is_privileged", String.valueOf(privileged));
+                ev.addMetadata("realm", realm.getName());
+                ev.addMetadata("username", user.getUsername());
+                String ip = getRemoteAddr(context);
+                if (!"unknown".equals(ip)) ev.addMetadata("ip", ip);
+                var client = context.getAuthenticationSession().getClient();
+                if (client != null) ev.addMetadata("client_id", client.getClientId());
+                EventQueue.shared(config).submit(ev);
+            } catch (RuntimeException e) {
+                logger.debugf("[HumifortisRiskAuthenticator] fallback report failed: %s", e.getMessage());
+            }
+        }
+        return action;
+    }
+
+    /** The flow action of a fallback outcome: a step-up prefers the user's passkey. */
+    static String fallbackAction(FallbackPolicy.Outcome outcome, List<String> mfaMethods) {
+        return switch (outcome) {
+            case ALLOW -> "ALLOW";
+            case DENY -> "DENY";
+            case STEP_UP -> mfaMethods.contains("WEBAUTHN") || mfaMethods.contains("WEBAUTHN_PASSWORDLESS")
+                    ? "REQUIRE_WEBAUTHN" : "REQUIRE_MFA";
         };
+    }
+
+    /** The tenant's mode as last seen (a tenant in shadow/dry_run is never blocked by a fallback). */
+    private static String resolveFallbackMode(AuthenticationFlowContext context) {
+        if (ENFORCEMENT_MODE_ENV != null) return ENFORCEMENT_MODE_ENV;
+        String cached = FallbackPolicy.cachedMode(SaasConfig.fromEnv().tenantIdOr(context.getRealm().getName()));
+        return cached != null ? cached : "enforce";
     }
 
     private static String deriveLevel(Risk risk) {

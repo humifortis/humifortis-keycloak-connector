@@ -1,17 +1,12 @@
 package tech.humifortis.keycloak.auth;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 import org.jboss.logging.Logger;
 import org.keycloak.models.KeycloakSession;
@@ -22,7 +17,11 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.annotations.SerializedName;
 
-import tech.humifortis.keycloak.client.HttpClientFactory;
+import tech.humifortis.keycloak.client.HumifortisTransport;
+import tech.humifortis.keycloak.client.ProxySettings;
+import tech.humifortis.keycloak.client.RateLimitedLog;
+import tech.humifortis.keycloak.client.RetryPolicy;
+import tech.humifortis.keycloak.client.SaasConfig;
 import tech.humifortis.keycloak.model.Risk;
 import tech.humifortis.keycloak.user.UserContextExtractor;
 import tech.humifortis.keycloak.user.UserContextSnapshot;
@@ -56,36 +55,28 @@ public class HumifortisRiskEvaluator {
 
     private static final Logger logger = Logger.getLogger(HumifortisRiskEvaluator.class);
 
-    static final String ENV_API_URL    = "HUMIFORTIS_API_URL";
-    static final String ENV_API_KEY    = "HUMIFORTIS_API_KEY";
-    static final String ENV_TIMEOUT_MS = "HUMIFORTIS_TIMEOUT_MS";
     static final String ENV_TENANT_ID  = "HUMIFORTIS_TENANT_ID";
-    static final String ENV_ALLOW_INSECURE_HTTP = "HUMIFORTIS_ALLOW_INSECURE_HTTP";
-
-    static final String DEFAULT_API_URL   = "https://api.humifortis.com";
-    static final int    DEFAULT_TIMEOUT_MS = 2000;
     static final String FAIL_OPEN_REASON   = "Humifortis unavailable - fail open";
 
-    // ── Circuit breaker (shared across all evaluator instances) ─────────────
-    private static volatile int  consecutiveFailures = 0;
-    private static volatile long circuitOpenUntil    = 0;
-    private static final int  CIRCUIT_OPEN_THRESHOLD   = 3;
-    private static final long CIRCUIT_OPEN_DURATION_MS = 10_000;
+    private static final RateLimitedLog misconfigLog = new RateLimitedLog(60_000);
+    private static final RateLimitedLog failureLog = new RateLimitedLog(60_000);
 
-    private final HttpClient          httpClient;
     private final KeycloakSession     session;
+    private final SaasConfig          config;
+    private final HumifortisTransport transport;
     private final Gson                gson;
     private final UserContextExtractor userContextExtractor;
 
     public HumifortisRiskEvaluator(KeycloakSession session) {
+        this(session, SaasConfig.fromEnv(), null);
+    }
+
+    HumifortisRiskEvaluator(KeycloakSession session, SaasConfig config, HumifortisTransport transport) {
         this.session = session;
-        this.gson    = new GsonBuilder().create();
+        this.config  = config;
+        this.transport = transport != null ? transport : HumifortisTransport.shared(config);
+        this.gson    = new GsonBuilder().disableHtmlEscaping().create();
         this.userContextExtractor = new UserContextExtractor();
-        this.httpClient = HttpClientFactory.create(
-                DEFAULT_TIMEOUT_MS,
-                HttpClientFactory.isInsecureSslEnabled(System.getenv("INSECURE_SSL")),
-                envOrDefault("HUMIFORTIS_INSECURE_SSL_CERT_SHA256", null)
-        );
     }
 
     // =========================================================================
@@ -106,39 +97,35 @@ public class HumifortisRiskEvaluator {
         return evaluateDetailed(realm, knownUser, flowId).risk();
     }
 
+    /**
+     * Asks Humifortis for the decision. Never throws and never waits longer than the evaluate
+     * budget (retries included). Without an answer, the result carries no decision and says
+     * why ({@link EvaluationResult#fallbackReason()}): the authenticator applies the fallback policy.
+     */
     EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId) {
         if (knownUser == null) {
-            logger.warnf("[HumifortisRiskEvaluator] User is null — fail open");
-            return new EvaluationResult(failOpen(), null);
+            logger.warnf("[HumifortisRiskEvaluator] User is null — fallback");
+            return EvaluationResult.fallback("null_user");
         }
-        if (isCircuitOpen()) {
-            logger.debugf("[HumifortisRiskEvaluator] Circuit OPEN — fail open");
-            return new EvaluationResult(failOpen(), null);
-        }
-
-        String apiUrl   = envOrDefault(ENV_API_URL, DEFAULT_API_URL);
-        String apiKey   = System.getenv(ENV_API_KEY);
-        int    timeout  = parseTimeout(System.getenv(ENV_TIMEOUT_MS));
-        String tenantId = envOrDefault(ENV_TENANT_ID, realm.getName());
+        String tenantId = config.tenantIdOr(realm.getName());
         String entityId = buildEntityId(realm, knownUser);
 
-        if (apiKey == null || apiKey.isBlank()) {
-            logger.warnf("[HumifortisRiskEvaluator] API key missing (entity=%s) — fail open", entityId);
-            return new EvaluationResult(failOpen(), null);
+        if (!config.hasApiKey()) {
+            misconfigLog.error(logger, "[Humifortis] HUMIFORTIS_API_KEY is not set — logins are not evaluated (fallback policy applies)");
+            return EvaluationResult.fallback("missing_api_key");
+        }
+        if (!config.isEndpointAllowed()) {
+            misconfigLog.error(logger, "[Humifortis] HUMIFORTIS_API_URL must be https:// (got " + config.getApiUrl()
+                    + ") — logins are not evaluated (fallback policy applies)");
+            return EvaluationResult.fallback("insecure_url");
         }
 
-        boolean secureUrl = apiUrl.toLowerCase(Locale.ROOT).startsWith("https://");
-        if (!isAllowedEndpoint(apiUrl, System.getenv(ENV_ALLOW_INSECURE_HTTP))) {
-            logger.warnf("[HumifortisRiskEvaluator] Non-HTTPS URL (entity=%s) — fail open", entityId);
-            return new EvaluationResult(failOpen(), null);
-        }
-        if (!secureUrl) {
-            logger.warnf("[HumifortisRiskEvaluator] Explicit insecure HTTP override enabled (entity=%s)", entityId);
-        }
-
+        // one id per decision: a retry the server already processed is answered, never re-scored
+        String callId = UUID.randomUUID().toString();
+        String body;
         try {
-            // Build payload
             EventPayload event = new EventPayload();
+            event.event_id    = callId;
             event.entity_id   = entityId;
             event.entity_type = "user"; // must match entity_type sent by HumifortisEventListener so /evaluate reads the same Redis risk key as /events
             event.event_type  = "auth_credential_verified"; // credentials confirmed; session NOT yet established
@@ -150,50 +137,38 @@ public class HumifortisRiskEvaluator {
             EvaluateRequestPayload payload = new EvaluateRequestPayload();
             payload.event             = event;
             payload.available_methods = detectAvailableMethods(knownUser);
-
-            String url = apiUrl + "/evaluate";
-            logger.debugf("[HumifortisRiskEvaluator] POST %s entity=%s", url, entityId);
-
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .header("Accept",       "application/json")
-                    .header("Content-Type", "application/json")
-                    .header("X-API-Key",    apiKey)
-                    .header("X-Tenant-ID",  tenantId)
-                    .timeout(Duration.ofMillis(timeout))
-                    .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload)))
-                    .build();
-
-            HttpResponse<String> response =
-                    httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-
-            int status = response.statusCode();
-            logger.debugf("[HumifortisRiskEvaluator] HTTP %d", status);
-
-            if (status < 200 || status >= 300) {
-                logger.warnf("[HumifortisRiskEvaluator] HTTP error %d (entity=%s) — fail open",
-                        status, entityId);
-                recordFailure();
-                return new EvaluationResult(failOpen(), null);
-            }
-
-            EvaluateResponse decision = gson.fromJson(response.body(), EvaluateResponse.class);
-            recordSuccess();
-
-            String riskLevel = decision.risk_level != null ? decision.risk_level : "MINIMAL";
-            String reason    = buildReason(decision);
-
-            logger.debugf("[HumifortisRiskEvaluator] level=%s action=%s rule=%s score=%.1f",
-                    riskLevel, decision.action, decision.playbook_rule, decision.risk_score);
-
-            return new EvaluationResult(mapRiskLevel(riskLevel, reason), decision);
-
-        } catch (Exception e) {
-            logger.warnf("[HumifortisRiskEvaluator] Exception (entity=%s): %s",
-                    entityId, e.getMessage());
-            recordFailure();
-            return new EvaluationResult(failOpen(), null);
+            body = gson.toJson(payload);
+        } catch (RuntimeException e) {
+            logger.warnf("[HumifortisRiskEvaluator] payload build failed (entity=%s): %s", entityId, e.getMessage());
+            return EvaluationResult.fallback("error");
         }
+
+        HumifortisTransport.Result result = transport.send(
+                HumifortisTransport.jsonPost(config, "/evaluate", tenantId, body),
+                RetryPolicy.evaluate(config), callId);
+        if (!result.ok()) {
+            String reason = result.failure().reason();
+            failureLog.warn(logger, "[Humifortis] no decision from the API (" + reason
+                    + (result.status() > 0 ? ", HTTP " + result.status() : "") + ", attempts=" + result.attempts()
+                    + ") — fallback policy applies");
+            return EvaluationResult.fallback(reason);
+        }
+
+        EvaluateResponse decision;
+        try {
+            decision = gson.fromJson(result.body(), EvaluateResponse.class);
+        } catch (RuntimeException e) {
+            logger.warnf("[HumifortisRiskEvaluator] unreadable decision (entity=%s): %s", entityId, e.getMessage());
+            return EvaluationResult.fallback("error");
+        }
+        if (decision == null) return EvaluationResult.fallback("error");
+        FallbackPolicy.remember(tenantId, decision.fallback_policy, decision.mode);
+
+        String riskLevel = decision.risk_level != null ? decision.risk_level : "MINIMAL";
+        String reason    = buildReason(decision);
+        logger.debugf("[HumifortisRiskEvaluator] level=%s action=%s rule=%s score=%.1f",
+                riskLevel, decision.action, decision.playbook_rule, decision.risk_score);
+        return new EvaluationResult(mapRiskLevel(riskLevel, reason), decision, null);
     }
 
     static boolean isAllowedEndpoint(String apiUrl, String allowInsecureHttp) {
@@ -211,10 +186,28 @@ public class HumifortisRiskEvaluator {
         Map<String, Object> meta = new HashMap<>();
         UserContextSnapshot userContext = userContextExtractor.extract(session, realm, user);
 
-        // IP address — real client IP after nginx real_ip_module resolves CF-Connecting-IP
+        // Client IP as Keycloak resolved it (its proxy configuration decides which headers it
+        // believes) — never read from a request header here. How it was resolved goes along.
         safeCollect(meta, "ip", () -> {
             var conn = session.getContext().getConnection();
             return conn != null ? conn.getRemoteAddr() : null;
+        });
+        ProxySettings.current().writeTo(meta::put);
+
+        // The application the user signs in to — per-application access policies scope on it
+        safeCollect(meta, "client_id", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null && as.getClient() != null ? as.getClient().getClientId() : null;
+        });
+        safeCollect(meta, "client_name", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            String name = as != null && as.getClient() != null ? as.getClient().getName() : null;
+            return name != null && !name.isBlank() ? truncate(name, 255) : null;
+        });
+        safeCollect(meta, "redirect_uri", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            String uri = as != null ? as.getRedirectUri() : null;
+            return uri != null && !uri.isBlank() ? truncate(uri, 1024) : null;
         });
 
         // Cloudflare geo-country (free, instant, available when CF is the proxy).
@@ -374,23 +367,8 @@ public class HumifortisRiskEvaluator {
         if (userContext.username() != null) meta.put("username", userContext.username());
         if (userContext.email()    != null) meta.put("email",    userContext.email());
 
-        // email_verified — required for EMAIL_OTP safety (unverified email is attackable)
-        meta.put("email_verified", String.valueOf(userContext.emailVerified()));
-
-        // mfa_methods — enrolled methods as comma-separated string for feature engine
-        // (distinct from available_methods which includes EMAIL_OTP derived from email_verified)
-        if (!userContext.mfaMethods().isEmpty()) {
-            meta.put("mfa_methods", String.join(",", userContext.mfaMethods()));
-        }
-        if (userContext.accountAgeDays() != null) {
-            meta.put("account_age_days", String.valueOf(userContext.accountAgeDays()));
-        }
-        if (!userContext.roleNames().isEmpty()) {
-            meta.put("user_roles", String.join(",", userContext.roleNames()));
-        }
-        meta.put("is_privileged", String.valueOf(userContext.privileged()));
-        meta.put("mfa_enrolled", String.valueOf(userContext.mfaEnrolled()));
-        meta.put("active_session_count", String.valueOf(userContext.activeSessionCount()));
+        // identity: effective roles, groups, privilege (and why), account creation, sessions
+        userContext.writeTo(meta::put);
 
         meta.put("realm", realm.getName());
         return meta;
@@ -415,26 +393,6 @@ public class HumifortisRiskEvaluator {
         } catch (Exception e) {
             logger.debugf("[HumifortisRiskEvaluator] MFA methods detection failed: %s", e.getMessage());
             return List.of("EMAIL_OTP");
-        }
-    }
-
-    // =========================================================================
-    // CIRCUIT BREAKER
-    // =========================================================================
-
-    private static boolean isCircuitOpen() {
-        if (consecutiveFailures < CIRCUIT_OPEN_THRESHOLD) return false;
-        return System.currentTimeMillis() <= circuitOpenUntil;
-    }
-
-    private static void recordSuccess() { consecutiveFailures = 0; }
-
-    private static void recordFailure() {
-        consecutiveFailures++;
-        if (consecutiveFailures >= CIRCUIT_OPEN_THRESHOLD) {
-            circuitOpenUntil = System.currentTimeMillis() + CIRCUIT_OPEN_DURATION_MS;
-            logger.warnf("[HumifortisRiskEvaluator] Circuit OPENED — %d failures, retry in %dms",
-                    consecutiveFailures, CIRCUIT_OPEN_DURATION_MS);
         }
     }
 
@@ -586,9 +544,7 @@ public class HumifortisRiskEvaluator {
      */
     public void registerTrustTokenAsync(String canonicalEntityId, String tokenHash, String tenantId,
                                         String deviceId, String deviceName, String platform, String ipAddress) {
-        String apiUrl = envOrDefault(ENV_API_URL, DEFAULT_API_URL);
-        String apiKey = System.getenv(ENV_API_KEY);
-        if (apiKey == null || apiKey.isBlank()) {
+        if (!config.hasApiKey()) {
             logger.warnf("[HumifortisRiskEvaluator] registerTrustToken: API key missing");
             return;
         }
@@ -601,40 +557,20 @@ public class HumifortisRiskEvaluator {
         payload.platform = isBlank(platform) ? null : platform;
         payload.ip_address = isBlank(ipAddress) ? null : ipAddress;
         String body = gson.toJson(payload);
-        String url = apiUrl + "/devices/trust";
-
-        try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .header("Content-Type", "application/json")
-                    .header("X-API-Key",    apiKey)
-                    .header("X-Tenant-ID",  tenantId)
-                    .timeout(Duration.ofMillis(DEFAULT_TIMEOUT_MS))
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                    .build();
-            java.util.concurrent.CompletableFuture.runAsync(() -> {
-                try {
-                    HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-                    if (resp.statusCode() == 201) {
-                        logger.infof("[HumifortisRiskEvaluator] Browser token registered for entity=%s",
-                                canonicalEntityId);
-                    } else {
-                        logger.warnf("[HumifortisRiskEvaluator] registerTrustToken HTTP %d: %s",
-                                resp.statusCode(), resp.body());
-                    }
-                } catch (Exception e) {
-                    logger.warnf("[HumifortisRiskEvaluator] registerTrustToken async failed: %s",
-                            e.getMessage());
-                }
-            });
-        } catch (Exception e) {
-            logger.warnf("[HumifortisRiskEvaluator] registerTrustToken setup failed: %s", e.getMessage());
-        }
+        String key = UUID.randomUUID().toString();
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            HumifortisTransport.Result r = transport.send(
+                    HumifortisTransport.jsonPost(config, "/devices/trust", tenantId, body), RetryPolicy.events(config), key);
+            if (r.ok()) {
+                logger.infof("[HumifortisRiskEvaluator] Browser token registered for entity=%s", canonicalEntityId);
+            } else {
+                logger.warnf("[HumifortisRiskEvaluator] registerTrustToken failed: %s HTTP %d", r.failure().reason(), r.status());
+            }
+        });
     }
 
-    private static int parseTimeout(String raw) {
-        if (raw == null || raw.isBlank()) return DEFAULT_TIMEOUT_MS;
-        try { return Integer.parseInt(raw); } catch (NumberFormatException e) { return DEFAULT_TIMEOUT_MS; }
+    private static String truncate(String value, int max) {
+        return value.length() <= max ? value : value.substring(0, max);
     }
 
     private static boolean isBlank(String value) {
@@ -651,6 +587,7 @@ public class HumifortisRiskEvaluator {
     }
 
     private static class EventPayload {
+        public String              event_id;  // idempotency: every retry of one decision carries the same id
         public String              entity_id;
         public String              entity_type;
         public String              event_type;
@@ -685,6 +622,12 @@ public class HumifortisRiskEvaluator {
         @SerializedName("geo_city")             public String       geo_city;
         /** Enforcement mode: enforce | dry_run | shadow */
         @SerializedName("mode")                 public String       mode;
+        /** The tenant's policy for logins Humifortis cannot answer — cached for the next outage. */
+        @SerializedName("fallback_policy")      public Map<String, String> fallback_policy;
+        /** Who decided: platform | tenant | baseline. */
+        @SerializedName("policy_source")        public String       policy_source;
+        /** The tenant access policy that decided, when one did. */
+        @SerializedName("access_policy")        public String       access_policy;
         // ─── Verified-Unblock (admin-initiated step-up) ──────────────────────
         /**
          * Set to REQUIRE_MFA_VERIFICATION when a DENY was downgraded to a step-up MFA
@@ -698,7 +641,16 @@ public class HumifortisRiskEvaluator {
         @SerializedName("verification_required_level")  public String verification_required_level;
     }
 
-    record EvaluationResult(Risk risk, EvaluateResponse decision) {}
+    /**
+     * @param fallbackReason why there is no decision (timeout, circuit_open, unreachable,
+     *                       http_5xx, http_4xx, missing_api_key, insecure_url, null_user, error);
+     *                       null when Humifortis answered
+     */
+    record EvaluationResult(Risk risk, EvaluateResponse decision, String fallbackReason) {
+        static EvaluationResult fallback(String reason) {
+            return new EvaluationResult(failOpen(), null, reason);
+        }
+    }
 
     private static class TrustTokenPayload {
         String entity_id;

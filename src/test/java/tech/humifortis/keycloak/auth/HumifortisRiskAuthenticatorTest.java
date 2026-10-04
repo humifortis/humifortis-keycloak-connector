@@ -75,5 +75,15 @@ class HumifortisRiskAuthenticatorTest {
                   + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
         assertEquals("Safari on macOS", HumifortisRiskAuthenticator.parseDeviceSummary(ua));
     }
-}
 
+    // ── fallback ──────────────────────────────────────────────────────────────
+
+    @Test
+    void fallbackStepUpPrefersAPasskey() {
+        assertEquals("REQUIRE_WEBAUTHN", HumifortisRiskAuthenticator.fallbackAction(FallbackPolicy.Outcome.STEP_UP, java.util.List.of("TOTP", "WEBAUTHN")));
+        assertEquals("REQUIRE_MFA", HumifortisRiskAuthenticator.fallbackAction(FallbackPolicy.Outcome.STEP_UP, java.util.List.of("TOTP")));
+        assertEquals("REQUIRE_MFA", HumifortisRiskAuthenticator.fallbackAction(FallbackPolicy.Outcome.STEP_UP, java.util.List.of()));
+        assertEquals("DENY", HumifortisRiskAuthenticator.fallbackAction(FallbackPolicy.Outcome.DENY, java.util.List.of("TOTP")));
+        assertEquals("ALLOW", HumifortisRiskAuthenticator.fallbackAction(FallbackPolicy.Outcome.ALLOW, java.util.List.of()));
+    }
+}

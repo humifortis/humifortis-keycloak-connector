@@ -177,8 +177,9 @@ public CompletableFuture<Void> sendEventAsync(HumifortisEvent event) {
 |----------|----------|---------|-------------|
 | `HUMIFORTIS_API_URL` | No | `https://api.humifortis.educosmic.tech` | SaaS API endpoint |
 | `HUMIFORTIS_API_KEY` | **Yes** | - | API key from SaaS registration |
-| `HUMIFORTIS_TIMEOUT_MS` | No | `5000` | HTTP request timeout |
-| `HUMIFORTIS_FALLBACK_ALLOW` | No | `true` | Allow access if SaaS unreachable |
+| `HUMIFORTIS_TIMEOUT_MS` | No | `800` | Timeout of one API attempt (ms) |
+| `HUMIFORTIS_EVALUATE_BUDGET_MS` | No | `1500` | Longest a login waits for a decision, retries included (ms) |
+| `HUMIFORTIS_FALLBACK` | No | (tenant policy) | `allow` \| `step_up` \| `deny` when Humifortis cannot answer — overrides the tenant policy (see INSTALLATION.md, Resilience) |
 
 ### Keycloak Setup
 

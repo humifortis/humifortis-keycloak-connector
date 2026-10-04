@@ -333,12 +333,78 @@ tail -f /opt/keycloak/data/log/keycloak.log
 
 ### Environment Variables
 
+Zero configuration beyond the API key; everything else has a safe default.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `HUMIFORTIS_API_URL` | No | `https://api.humifortis.educosmic.tech` | SaaS API endpoint |
-| `HUMIFORTIS_API_KEY` | **Yes** | - | API key from connector registration |
-| `HUMIFORTIS_TIMEOUT_MS` | No | `5000` | HTTP timeout in milliseconds |
-| `HUMIFORTIS_FALLBACK_ALLOW` | No | `true` | Allow access if SaaS unreachable |
+| `HUMIFORTIS_API_URL` | No | `https://api.humifortis.educosmic.tech` | API endpoint (https only) |
+| `HUMIFORTIS_API_KEY` | **Yes** | - | API key from connector registration. Without it no login is evaluated (the fallback policy applies) and an error is logged once a minute |
+| `HUMIFORTIS_TENANT_ID` | No | realm name | Tenant |
+| `HUMIFORTIS_TIMEOUT_MS` | No | `800` | Timeout of ONE API attempt |
+| `HUMIFORTIS_EVALUATE_BUDGET_MS` | No | `1500` | Longest a login waits for a decision, retries included |
+| `HUMIFORTIS_FALLBACK` | No | (tenant policy) | `allow` \| `step_up` \| `deny` for logins Humifortis cannot answer. Overrides the tenant's policy — an operator's emergency switch |
+| `HUMIFORTIS_EVENT_QUEUE_SIZE` | No | `10000` | Events buffered while the API is unreachable |
+| `HUMIFORTIS_FALLBACK_ALLOW` | No | - | **Deprecated.** `false` = `HUMIFORTIS_FALLBACK=deny` |
+
+### Resilience: what happens when Humifortis is slow or down
+
+- **Retries.** A failed call (connection error, timeout, HTTP 429/502/503/504) is retried with
+  jittered exponential backoff — never beyond `HUMIFORTIS_EVALUATE_BUDGET_MS` for a login. A
+  4xx is never retried (a bad key will not get better).
+- **Circuit breaker.** After 5 failed calls in a row the connector stops calling for 10 s (then
+  20 s, 40 s… up to 2 min), letting one probe through to detect recovery. Logins do not each
+  wait out a timeout during an outage.
+- **Events are not lost.** Keycloak events wait in a bounded in-memory queue and are delivered
+  in order once the API answers again, each exactly once (stable `event_id`). Events older than
+  15 minutes are dropped; a full queue drops admin events before login events.
+- **Fallback policy.** A login that gets no decision follows your tenant's fallback policy,
+  configured in Humifortis (*Decision policy → Enforcement*) and cached by the connector from
+  every decision, so it applies during the outage itself. Built-in default (before the first
+  decision): ordinary users are allowed, privileged users must pass a second factor (denied if
+  they have none). Every such login is reported to Humifortis afterwards
+  (`auth_decision_fallback`), and a burst of them raises a SOC alert.
+
+### Reverse proxy and client IP
+
+Every network rule (new network, Tor, impossible travel, threat intelligence) uses the client IP
+**as Keycloak resolved it**. Behind a reverse proxy, Keycloak must believe proxy headers from
+that proxy **only** — otherwise any client chooses its own IP with an `X-Forwarded-For` header:
+
+```bash
+kc.sh start --proxy-headers=xforwarded --proxy-trusted-addresses=10.0.0.5,10.0.0.6
+# or: KC_PROXY_HEADERS=xforwarded  KC_PROXY_TRUSTED_ADDRESSES=10.0.0.0/24
+```
+
+The edge proxy must **replace** the header with the address it saw, never append to the
+client's own:
+
+```nginx
+proxy_set_header X-Forwarded-For $remote_addr;   # not $proxy_add_x_forwarded_for on the first hop
+```
+
+The connector reports how the IP was resolved with every event; Humifortis raises a HIGH alert
+(*Client IP can be forged*) when proxy headers are enabled without trusted addresses.
+
+### Realm attributes (optional)
+
+Set in *Realm settings → General → Unmanaged attributes* (or the admin API):
+
+| Attribute | Example | Meaning |
+|-----------|---------|---------|
+| `hf.privileged.roles` | `finance-admin, my-app:admin` | Roles that make a user privileged, in addition to Keycloak's administrator roles. Client roles are `clientId:role` |
+| `hf.privileged.groups` | `/it/admins, /finance` | Group paths whose members (and subgroups) are privileged |
+| `hf.account.createdAttributes` | `createTimestamp, whenCreated` | User attributes holding the creation time of federated (LDAP / AD) accounts |
+
+Roles are **effective** roles: direct, inherited from groups, composites expanded — an
+administrator through a group is seen as one. Groups are sent as paths. Both lists are bounded
+(100 entries, 4 KiB).
+
+### WebAuthn (passkeys) as a step-up
+
+When a decision requires a phishing-resistant factor (`REQUIRE_WEBAUTHN`, e.g. a tenant access
+policy), the step-up router runs Keycloak's own WebAuthn ceremony for users with a passkey or
+security key, and falls back to an email code for users without one. No flow change is needed;
+enable *Webauthn Register* in *Authentication → Required actions* to let users enroll.
 
 ### Monitored Events
 

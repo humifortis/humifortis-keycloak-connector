@@ -174,8 +174,9 @@ public class HumifortisStepUpRouter implements Authenticator {
             MfaMethod method = MfaMethod.fromString(
                     context.getAuthenticationSession().getAuthNote(NOTE_MFA_METHOD));
             switch (method) {
-                case TOTP     -> context.attempted(); // delegated to auth-otp-form ALTERNATIVE
-                case WEBAUTHN, EMAIL_OTP -> validateEmailOtp(context);
+                case TOTP      -> context.attempted(); // delegated to auth-otp-form ALTERNATIVE
+                case WEBAUTHN  -> webAuthn(context).action(context); // Keycloak validates the assertion
+                case EMAIL_OTP -> validateEmailOtp(context);
             }
         } catch (Exception e) {
             logger.errorf("[StepUpRouter] Validation error: %s", e.getMessage());
@@ -285,11 +286,25 @@ public class HumifortisStepUpRouter implements Authenticator {
     }
 
     // =========================================================================
-    // WEBAUTHN — fallback to EMAIL_OTP
+    // WEBAUTHN — Keycloak's own WebAuthn ceremony (passkey / security key); a user
+    // without one degrades to EMAIL_OTP
     // =========================================================================
+
+    /** Keycloak's WebAuthn authenticator, run inside this step (no realm-flow change needed). */
+    org.keycloak.authentication.Authenticator webAuthn(AuthenticationFlowContext context) {
+        return new org.keycloak.authentication.authenticators.browser.WebAuthnAuthenticator(context.getSession());
+    }
 
     private void challengeWebAuthn(AuthenticationFlowContext context,
                                    AuthenticatorConfigModel cfg, String correlationId) {
+        if (isEnrolled(context.getUser(), MfaMethod.WEBAUTHN)) {
+            logger.infof("[StepUpRouter] REQUIRE_WEBAUTHN: WebAuthn challenge user=%s",
+                         context.getUser().getUsername());
+            HumifortisAuditLog.log("webauthn_challenge", context.getUser().getId(),
+                    "WEBAUTHN", "initiated", "", correlationId, "");
+            webAuthn(context).authenticate(context);
+            return;
+        }
         logger.warnf("[StepUpRouter] REQUIRE_WEBAUTHN: not enrolled -> degraded EMAIL_OTP user=%s",
                      context.getUser().getUsername());
         HumifortisAuditLog.log("webauthn_degraded", context.getUser().getId(),

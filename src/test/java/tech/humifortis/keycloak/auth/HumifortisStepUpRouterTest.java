@@ -333,4 +333,49 @@ class HumifortisStepUpRouterTest {
         AuthenticatorConfigModel m = config("allow.enrollment", "false");
         assertFalse(router.getBoolConfig(m, "allow.enrollment", true));
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // WEBAUTHN — a real ceremony when enrolled (it used to always degrade to email)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private static CredentialModel cred(String type) {
+        CredentialModel c = new CredentialModel();
+        c.setType(type);
+        return c;
+    }
+
+    @Test
+    void webauthnRequiredAndEnrolled_runsKeycloaksWebAuthnCeremony() {
+        org.keycloak.authentication.Authenticator keycloakWebAuthn = mock(org.keycloak.authentication.Authenticator.class);
+        HumifortisStepUpRouter r = new HumifortisStepUpRouter() {
+            @Override
+            org.keycloak.authentication.Authenticator webAuthn(org.keycloak.authentication.AuthenticationFlowContext c) {
+                return keycloakWebAuthn;
+            }
+        };
+        var context = mock(org.keycloak.authentication.AuthenticationFlowContext.class, RETURNS_DEEP_STUBS);
+        when(context.getUser()).thenReturn(user);
+        lenient().when(user.getId()).thenReturn("u1");
+        lenient().when(user.getUsername()).thenReturn("alice");
+        when(user.credentialManager()).thenReturn(creds);
+        when(creds.getStoredCredentialsStream()).thenAnswer(i -> Stream.of(cred("webauthn")));
+        when(context.getAuthenticationSession().getAuthNote(HumifortisRiskAuthenticator.NOTE_RISK_ACTION)).thenReturn("REQUIRE_WEBAUTHN");
+        lenient().when(context.getConnection().getRemoteAddr()).thenReturn("203.0.113.9");
+
+        r.authenticate(context);
+        verify(keycloakWebAuthn).authenticate(context);
+        verify(context.getAuthenticationSession()).setAuthNote(HumifortisStepUpRouter.NOTE_MFA_METHOD, "WEBAUTHN");
+
+        when(context.getAuthenticationSession().getAuthNote(HumifortisStepUpRouter.NOTE_MFA_METHOD)).thenReturn("WEBAUTHN");
+        r.action(context);
+        verify(keycloakWebAuthn).action(context);
+    }
+
+    @Test
+    void webauthnRequiredNotEnrolled_resolvesToEmailOtp() {
+        when(user.credentialManager()).thenReturn(creds);
+        when(creds.getStoredCredentialsStream()).thenAnswer(i -> Stream.of(cred("otp")));
+        var m = router.resolveMethod("REQUIRE_WEBAUTHN", user, "EMAIL_OTP,TOTP,WEBAUTHN", "EMAIL_OTP", null);
+        assertEquals(HumifortisStepUpRouter.MfaMethod.EMAIL_OTP, m);
+    }
 }
