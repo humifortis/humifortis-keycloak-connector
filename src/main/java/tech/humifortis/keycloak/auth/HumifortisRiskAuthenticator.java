@@ -5,22 +5,18 @@ import org.jboss.logging.Logger;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.Authenticator;
-import org.keycloak.events.EventBuilder;
-import org.keycloak.events.EventType;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import tech.humifortis.keycloak.HumifortisError;
 import tech.humifortis.keycloak.client.EventQueue;
 import tech.humifortis.keycloak.client.SaasConfig;
-import tech.humifortis.keycloak.model.HumifortisEvent;
 import tech.humifortis.keycloak.model.Risk;
 import tech.humifortis.keycloak.user.UserContextExtractor;
 import tech.humifortis.keycloak.user.UserContextSnapshot;
 
 import java.util.List;
 import java.util.Locale;
-import java.util.UUID;
 
 /**
  * Risk-based authenticator — thin enforcement layer driven by the Humifortis Core server.
@@ -30,7 +26,7 @@ import java.util.UUID;
  *   <li>Calls {@link HumifortisRiskEvaluator#evaluate} → POST /api/v1/evaluate with raw context.</li>
  *   <li>Reads the server's PLAYBOOK DECISION from the evaluator result.</li>
  *   <li>Stores risk level + action in auth session notes for downstream conditions.</li>
- *   <li>Fires a {@code CUSTOM_REQUIRED_ACTION} event for the EventListener feedback loop.</li>
+ *   <li>Reports what the flow did with the decision ({@code decision_enforced} / {@code decision_fallback_applied}).</li>
  *   <li>Executes the server's enforcement action — NO local policy logic.</li>
  * </ol>
  *
@@ -64,28 +60,14 @@ public class HumifortisRiskAuthenticator implements Authenticator {
     // Auth session note keys — shared with HumifortisHighCondition and HumifortisEventListener
     public static final String NOTE_RISK_ACTION  = "HUMIFORTIS_RISK_ACTION";
     public static final String NOTE_RISK_LEVEL   = "HUMIFORTIS_RISK_LEVEL";
-    public static final String NOTE_RISK_SCORE   = "HUMIFORTIS_RISK_SCORE";
-    public static final String NOTE_RISK_REASON  = "HUMIFORTIS_RISK_REASON";
-    public static final String NOTE_RISK_BLOCKED = "HUMIFORTIS_RISK_BLOCKED";
-
-    /**
-     * Stamped on the auth session (authNote) AND on the Keycloak event detail
-     * when the risk engine enforces MFA. Dual-source ensures the flag survives
-     * all Keycloak flow variants (auth session may be unavailable on LOGIN event).
-     * HumifortisEventListener reads this to emit auth_mfa_success before auth_login_success.
-     */
-    public static final String NOTE_MFA_ENFORCED = "HUMIFORTIS_MFA_ENFORCED";
 
     /**
      * Verified-Unblock challenge id (dual-source: authNote + event detail), stamped
      * when the server downgrades a DENY to a step-up MFA because an admin opened a
-     * verification window. HumifortisEventListener echoes it in auth_mfa_success so
-     * humifortis-core can bind the MFA to this challenge and clear the block.
+     * verification window. HumifortisEventListener echoes it in mfa_challenge_succeeded so
+     * humifortis-core can bind the step-up to this challenge and clear the block.
      */
     public static final String NOTE_CHALLENGE_ID = "HUMIFORTIS_CHALLENGE_ID";
-
-    /** Sentinel error tag on the feedback event — matched by HumifortisEventListener. */
-    public static final String RISK_EVENT_SENTINEL = "humifortis_risk_decision";
 
     // Enforcement mode — read once at class load
     private static final String ENFORCEMENT_MODE_ENV =
@@ -111,7 +93,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         // Step 1 — evaluate risk
         // Extract the Keycloak root auth session id (= code_id in OIDC browser flows).
         // This is used as flow_id so auth_credential_verified is grouped with the
-        // enforcement events (auth_decision_*) that share the same session.
+        // decision report (decision_enforced) that shares the same session.
         String flowId = null;
         try {
             flowId = context.getAuthenticationSession().getParentSession().getId();
@@ -130,6 +112,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         String riskLevel     = "MINIMAL";
         String playbookRule  = "";
         List<String> actions = List.of();
+        Fallback fallback    = null;
 
         if (serverDecision != null) {
             serverAction = nvl(serverDecision.action,       "ALLOW");
@@ -139,7 +122,8 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         } else {
             // No answer from Humifortis: the fallback policy decides (never a silent allow)
             riskLevel    = deriveLevel(risk);
-            serverAction = applyFallback(context, evaluation.fallbackReason(), flowId);
+            fallback     = applyFallback(context, evaluation.fallbackReason());
+            serverAction = fallback.action();
         }
 
         logger.debugf("[HumifortisRiskAuthenticator] action=%s level=%s rule=%s",
@@ -152,7 +136,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         // Step 3b — Verified-Unblock: if the server opened a verification window it
         // returns a challenge_id alongside a REQUIRE_MFA* step-up. Stamp it dual-source
         // (authNote survives the MFA sub-flow; event detail survives the LOGIN event)
-        // so HumifortisEventListener can echo it in auth_mfa_success for challenge binding.
+        // so HumifortisEventListener can echo it in mfa_challenge_succeeded for challenge binding.
         if (serverDecision != null && notBlank(serverDecision.verification_challenge_id)) {
             context.getAuthenticationSession().setAuthNote(NOTE_CHALLENGE_ID, serverDecision.verification_challenge_id);
             context.getEvent().detail(NOTE_CHALLENGE_ID, serverDecision.verification_challenge_id);
@@ -162,11 +146,12 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                     serverAction);
         }
 
-        // Step 4 — fire feedback event (best-effort, never blocks auth)
-        fireRiskDecisionEvent(context, risk, serverAction, riskLevel, playbookRule, serverDecision);
+        // Step 4 — the mode, then the report of what the flow does with the decision (sent after enforcement
+        // is decided, never before: in dry_run / shadow the person is let in and the report says so)
+        String mode = serverDecision != null ? resolveMode(serverDecision) : resolveFallbackMode(context);
+        reportDecision(context, flowId, serverDecision, fallback, serverAction, mode, riskLevel, playbookRule);
 
         // Step 5 — enforce (or simulate in dry_run / shadow mode)
-        String mode = serverDecision != null ? resolveMode(serverDecision) : resolveFallbackMode(context);
         if ("dry_run".equals(mode) || "shadow".equals(mode)) {
             logger.infof("[HumifortisRiskAuthenticator] %s mode: would=%s, actual=ALLOW (user=%s rule=%s)",
                     mode, serverAction,
@@ -191,6 +176,14 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                                List<String> actions,
                                Risk risk,
                                HumifortisRiskEvaluator.EvaluateResponse serverDecision) {
+        if (StepUpActions.isStepUp(action)) {
+            // success() here — HumifortisHighCondition in the sub-flow triggers the step-up, run by
+            // HumifortisStepUpRouter; HumifortisEventListener reports the step-up the router actually ran.
+            logger.infof("[HumifortisRiskAuthenticator] %s → delegating to MFA sub-flow", action);
+            executeSideActions(context, action, actions, serverDecision);
+            context.success();
+            return;
+        }
         switch (action) {
             case "ALLOW" -> {
                 logger.debugf("[HumifortisRiskAuthenticator] ALLOW");
@@ -198,20 +191,8 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                 context.success();
             }
 
-            case "REQUIRE_MFA", "REQUIRE_WEBAUTHN", "REQUIRE_EMAIL_OTP" -> {
-                // success() here — HumifortisHighCondition in the sub-flow triggers actual MFA.
-                // Dual-source stamp: authNote (survives the flow) + event detail (for the LOGIN event).
-                // HumifortisEventListener reads either source to emit auth_mfa_success.
-                logger.infof("[HumifortisRiskAuthenticator] %s → delegating to MFA sub-flow", action);
-                context.getAuthenticationSession().setAuthNote(NOTE_MFA_ENFORCED, "true");
-                context.getEvent().detail(NOTE_MFA_ENFORCED, "true");
-                executeSideActions(context, action, actions, serverDecision);
-                context.success();
-            }
-
             case "DENY" -> {
                 logger.warnf("[HumifortisRiskAuthenticator] DENY — %s", risk.getReason().orElse(""));
-                context.getAuthenticationSession().setAuthNote(NOTE_RISK_BLOCKED, "true");
                 executeSideActions(context, "DENY", actions, serverDecision);
                 // a fallback denial says "unavailable", never "suspicious": nothing was evaluated
                 HumifortisError err = serverDecision == null ? HumifortisError.SERVICE_TIMEOUT : HumifortisError.ACCESS_DENIED_RISK;
@@ -226,7 +207,6 @@ public class HumifortisRiskAuthenticator implements Authenticator {
 
             case "LOCK_ACCOUNT" -> {
                 logger.warnf("[HumifortisRiskAuthenticator] LOCK_ACCOUNT");
-                context.getAuthenticationSession().setAuthNote(NOTE_RISK_BLOCKED, "true");
                 disableUser(context);
                 revokeAllSessions(context);
                 context.failure(AuthenticationFlowError.ACCESS_DENIED,
@@ -503,65 +483,17 @@ public class HumifortisRiskAuthenticator implements Authenticator {
     }
 
     // =========================================================================
-    // FEEDBACK EVENT — fires a CUSTOM_REQUIRED_ACTION_ERROR event for the
-    // EventListener to send telemetry back to humifortis-core
-    // =========================================================================
-
-    private void fireRiskDecisionEvent(AuthenticationFlowContext context,
-                                       Risk risk,
-                                       String action,
-                                       String riskLevel,
-                                       String playbookRule,
-                                       HumifortisRiskEvaluator.EvaluateResponse d) {
-        try {
-            boolean blocked = "DENY".equalsIgnoreCase(action) || "LOCK_ACCOUNT".equalsIgnoreCase(action);
-
-            EventBuilder event = context.getEvent().clone().event(EventType.CUSTOM_REQUIRED_ACTION);
-            event.detail(NOTE_RISK_ACTION,  action);
-            event.detail(NOTE_RISK_SCORE,   String.valueOf(risk.getScore().ordinal()));
-            event.detail(NOTE_RISK_LEVEL,   riskLevel);
-            event.detail(NOTE_RISK_REASON,  playbookRule);
-            event.detail(NOTE_RISK_BLOCKED, String.valueOf(blocked));
-
-            if (d != null) {
-                if (notBlank(d.enforced_action))  event.detail("enforced_action",  d.enforced_action);
-                if (notBlank(d.playbook_rule))     event.detail("playbook_rule",    d.playbook_rule);
-                if (d.derived_signals != null && !d.derived_signals.isEmpty())
-                    event.detail("derived_signals", String.join(",", d.derived_signals));
-                if (d.actions != null && !d.actions.isEmpty())
-                    event.detail("all_actions", String.join(",", d.actions));
-                event.detail("device_is_new",       String.valueOf(d.device_is_new));
-                event.detail("device_is_trusted",   String.valueOf(d.device_is_trusted));
-                event.detail("risk_score_numeric",  String.valueOf(d.risk_score));
-            }
-
-            UserModel user = context.getUser();
-            if (user != null) {
-                event.user(user);
-                event.detail("userId",   user.getId());
-                event.detail("username", user.getUsername());
-            }
-
-            event.error(RISK_EVENT_SENTINEL);
-
-        } catch (Exception e) {
-            logger.debugf("[HumifortisRiskAuthenticator] fireRiskDecisionEvent skipped: %s",
-                    e.getMessage());
-        }
-    }
-
-    // =========================================================================
     // FALLBACK (server unreachable)
     // =========================================================================
 
     /** Auth note: why this login was decided without Humifortis (neutral text in the UI). */
     public static final String NOTE_FALLBACK_REASON = "hf.fallback.reason";
 
-    /**
-     * Decides a login Humifortis could not answer with the fallback policy, and reports it
-     * (queued: it reaches Humifortis when the API is back, so the SOC sees every such login).
-     */
-    private String applyFallback(AuthenticationFlowContext context, String reason, String flowId) {
+    /** The fallback policy's action for a login Humifortis could not answer, and what its report carries. */
+    record Fallback(String action, java.util.Map<String, String> report) {}
+
+    /** Decides a login Humifortis could not answer with the fallback policy (reported by {@link #reportDecision}). */
+    private Fallback applyFallback(AuthenticationFlowContext context, String reason) {
         UserModel user = context.getUser();
         RealmModel realm = context.getRealm();
         SaasConfig config = SaasConfig.fromEnv();
@@ -583,34 +515,58 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         logger.infof("[Humifortis] fallback applied: outcome=%s source=%s reason=%s privileged=%s user=%s",
                 d.outcome().wire(), d.source(), why, privileged, user != null ? user.getUsername() : "?");
 
-        if (config.hasApiKey() && user != null) {
-            try {
-                HumifortisEvent ev = new HumifortisEvent();
-                ev.setEventId(UUID.randomUUID().toString());
-                ev.setEntityId(HumifortisRiskEvaluator.buildEntityId(realm, user));
-                ev.setEntityType("user");
-                ev.setEventType("auth_decision_fallback");
-                ev.setSource("keycloak-rba");
-                ev.setTimestamp(java.time.Instant.now().toString());
-                ev.setFlowId(flowId);
-                ev.addMetadata("fallback_reason", why);
-                ev.addMetadata("fallback_outcome", d.outcome().wire());
-                ev.addMetadata("fallback_policy_source", d.source());
-                ev.addMetadata("fallback_action", action);
-                if (d.stepUpUnavailable()) ev.addMetadata("fallback_step_up_unavailable", "true");
-                ev.addMetadata("is_privileged", String.valueOf(privileged));
-                ev.addMetadata("realm", realm.getName());
-                ev.addMetadata("username", user.getUsername());
-                String ip = getRemoteAddr(context);
-                if (!"unknown".equals(ip)) ev.addMetadata("ip", ip);
-                var client = context.getAuthenticationSession().getClient();
-                if (client != null) ev.addMetadata("client_id", client.getClientId());
-                EventQueue.shared(config).submit(ev);
-            } catch (RuntimeException e) {
-                logger.debugf("[HumifortisRiskAuthenticator] fallback report failed: %s", e.getMessage());
+        java.util.Map<String, String> report = new java.util.LinkedHashMap<>();
+        report.put("fallback_reason", why);
+        report.put("fallback_outcome", d.outcome().wire());
+        report.put("fallback_policy_source", d.source());
+        if (d.stepUpUnavailable()) report.put("fallback_step_up_unavailable", "true");
+        report.put("is_privileged", String.valueOf(privileged));
+        return new Fallback(action, report);
+    }
+
+    /**
+     * Reports what the flow does with the decision of this login: {@code decision_enforced} (Humifortis answered)
+     * or {@code decision_fallback_applied} (the fallback policy decided). Queued, best-effort, never blocks the login.
+     */
+    private void reportDecision(AuthenticationFlowContext context, String flowId,
+                                HumifortisRiskEvaluator.EvaluateResponse d, Fallback fallback,
+                                String action, String mode, String riskLevel, String decisionRule) {
+        try {
+            SaasConfig config = SaasConfig.fromEnv();
+            UserModel user = context.getUser();
+            if (!config.hasApiKey() || user == null) return;
+            RealmModel realm = context.getRealm();
+            java.util.Map<String, String> extra = new java.util.LinkedHashMap<>();
+            extra.put("username", user.getUsername());
+            extra.put("risk_level", riskLevel);
+            String ip = getRemoteAddr(context);
+            if (!"unknown".equals(ip)) extra.put("ip", ip);
+            var client = context.getAuthenticationSession().getClient();
+            if (client != null) extra.put("client_id", client.getClientId());
+            String enforced = action;
+            String type;
+            if (d != null) {
+                type = DecisionReport.DECISION_ENFORCED;
+                if (notBlank(d.enforced_action)) enforced = d.enforced_action;
+                extra.put("decision_rule", decisionRule);
+                extra.put("risk_score", String.valueOf(d.risk_score));
+                extra.put("policy_source", d.policy_source);
+                extra.put("access_policy", d.access_policy);
+                extra.put("fallback_reason", d.fallback_reason);
+                if (d.derived_signals != null && !d.derived_signals.isEmpty()) extra.put("derived_signals", String.join(",", d.derived_signals));
+                if (d.actions != null && !d.actions.isEmpty()) extra.put("all_actions", String.join(",", d.actions));
+                extra.put("device_is_new", String.valueOf(d.device_is_new));
+                extra.put("device_is_trusted", String.valueOf(d.device_is_trusted));
+                extra.put("challenge_id", d.verification_challenge_id);
+            } else {
+                type = DecisionReport.FALLBACK_APPLIED;
+                if (fallback != null) extra.putAll(fallback.report());
             }
+            EventQueue.shared(config).submit(DecisionReport.build(type, HumifortisRiskEvaluator.buildEntityId(realm, user), DecisionReport.USER,
+                    flowId, realm.getName(), action, enforced, mode, extra));
+        } catch (RuntimeException e) {
+            logger.debugf("[HumifortisRiskAuthenticator] decision report failed: %s", e.getMessage());
         }
-        return action;
     }
 
     /** The flow action of a fallback outcome: a step-up prefers the user's passkey. */

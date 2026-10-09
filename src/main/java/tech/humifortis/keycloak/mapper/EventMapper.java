@@ -11,6 +11,9 @@ import org.keycloak.events.admin.AdminEvent;
 import org.keycloak.events.admin.OperationType;
 
 import tech.humifortis.keycloak.model.HumifortisEvent;
+import tech.humifortis.keycloak.serviceaccount.AdminChange;
+import tech.humifortis.keycloak.serviceaccount.AdminIdentityResolver;
+import tech.humifortis.keycloak.serviceaccount.ServiceAccountContext;
 
 public class EventMapper {
 
@@ -22,12 +25,22 @@ public class EventMapper {
         HumifortisEvent humiEvent = new HumifortisEvent();
 
         String realmId = event.getRealmId() != null ? event.getRealmId() : "unknown";
-        String userId  = event.getUserId()  != null ? event.getUserId()  : detailOrFallback(event.getDetails(), "userId", null);
-        if (userId == null || userId.isBlank()) {
-            userId = detailOrFallback(event.getDetails(), "username", "anonymous");
+        boolean serviceAccount = ServiceAccountContext.isClientCredentialsEvent(event.getType());
+        if (serviceAccount) {
+            // A client authenticating with its own credentials is a service account, not a person:
+            // the entity type is stated here, never inferred downstream. The client id identifies it
+            // (a failed login has no user id, and the id is what an operator recognises).
+            String clientId = event.getClientId() != null && !event.getClientId().isBlank() ? event.getClientId() : "unknown";
+            humiEvent.setEntityId(String.format("service_account:keycloak:%s:%s", realmId, clientId));
+            humiEvent.setEntityType("service_account");
+        } else {
+            String userId  = event.getUserId()  != null ? event.getUserId()  : detailOrFallback(event.getDetails(), "userId", null);
+            if (userId == null || userId.isBlank()) {
+                userId = detailOrFallback(event.getDetails(), "username", "anonymous");
+            }
+            humiEvent.setEntityId(String.format("user:keycloak:%s:%s", realmId, userId));
+            humiEvent.setEntityType("user");
         }
-        humiEvent.setEntityId(String.format("user:keycloak:%s:%s", realmId, userId));
-        humiEvent.setEntityType("user");
         humiEvent.setTimestamp(Instant.ofEpochMilli(event.getTime()).toString());
         humiEvent.setEventType(mapEventType(event.getType()));
         humiEvent.setSource("keycloak");
@@ -39,10 +52,17 @@ public class EventMapper {
         addCommonMetadata(humiEvent, realmId, event.getClientId(),
                 event.getIpAddress(), event.getSessionId(), event.getError());
         addContextMetadata(humiEvent, event.getDetails());
+        if (serviceAccount) {
+            addServiceAccountMetadata(humiEvent, event.getDetails());
+        }
 
         // flow_id — mandatory for auth events (groups all events of one authentication attempt).
         // Priority: authSessionId → code_id (OIDC) → sessionId (post-auth fallback)
         String flowId = extractFlowId(event.getDetails(), event.getSessionId());
+        if (flowId == null && serviceAccount) {
+            // a client_credentials request has no browser flow and often no session: one request is one flow
+            flowId = serviceAccountFlowId(event);
+        }
         humiEvent.setFlowId(flowId);
 
         return humiEvent;
@@ -53,6 +73,14 @@ public class EventMapper {
     // ----------------------------------------------------------------
 
     public HumifortisEvent fromKeycloakAdminEvent(AdminEvent adminEvent) {
+        return fromKeycloakAdminEvent(adminEvent, AdminIdentityResolver.NONE);
+    }
+
+    /**
+     * @param resolver read-only view of Keycloak used to recognise service accounts as the actor or
+     *                 the target of the change; never throws and answers "unknown" when it cannot tell
+     */
+    public HumifortisEvent fromKeycloakAdminEvent(AdminEvent adminEvent, AdminIdentityResolver resolver) {
         HumifortisEvent humiEvent = new HumifortisEvent();
 
         String realmId = adminEvent.getRealmId() != null ? adminEvent.getRealmId() : "unknown";
@@ -61,8 +89,14 @@ public class EventMapper {
             ? adminEvent.getAuthDetails().getUserId()
             : "admin";
 
-        humiEvent.setEntityId(String.format("user:keycloak:%s:%s", realmId, adminId));
-        humiEvent.setEntityType("user");
+        // A service account calling the Admin API acts through its internal service-account user:
+        // the actor is the service account (the client), never a `user` entity.
+        String actorClientId = safe(() -> resolver.serviceAccountClientOfUser(realmId, adminId));
+        String actorEntityId = actorClientId != null
+                ? serviceAccountEntityId(realmId, actorClientId)
+                : String.format("user:keycloak:%s:%s", realmId, adminId);
+        humiEvent.setEntityId(actorEntityId);
+        humiEvent.setEntityType(actorClientId != null ? "service_account" : "user");
         humiEvent.setTimestamp(Instant.ofEpochMilli(adminEvent.getTime()).toString());
         humiEvent.setSource("keycloak-admin");
 
@@ -99,28 +133,83 @@ public class EventMapper {
             humiEvent.addMetadata("error", adminEvent.getError());
         }
 
+        addAdminChangeMetadata(humiEvent, adminEvent, resourceType, resourcePath, op, actorClientId, resolver);
+
         return humiEvent;
     }
 
+    /**
+     * The change kind, who acted and — when the target is a service account — which one. humifortis-core
+     * scores an admin change to a service account only in the risky contexts these attributes describe.
+     * Every attribute is optional: an unknown value is omitted, never guessed.
+     */
+    private void addAdminChangeMetadata(HumifortisEvent humiEvent, AdminEvent adminEvent, String resourceType,
+                                        String resourcePath, OperationType op, String actorClientId,
+                                        AdminIdentityResolver resolver) {
+        String realmId = adminEvent.getRealmId() != null ? adminEvent.getRealmId() : "unknown";
+        humiEvent.addMetadata("admin.actor_type", actorClientId != null ? "service_account" : "user");
+
+        String change = AdminChange.kindOf(resourceType, op, resourcePath);
+        if (change != null) humiEvent.addMetadata("admin.change", change);
+
+        AdminChange.Target target = AdminChange.targetOf(resourcePath);
+        if (target == null) return;
+        String targetClientId = safe(() -> target.kind() == AdminChange.Target.Kind.USER
+                ? resolver.serviceAccountClientOfUser(realmId, target.id())
+                : resolver.serviceAccountClientOfClient(realmId, target.id()));
+        if (targetClientId == null) {
+            // a person the change acts on (password reset, session revocation, role change...): the subject of the change
+            if (target.kind() == AdminChange.Target.Kind.USER) {
+                humiEvent.addMetadata("admin.target_type", "user");
+                humiEvent.addMetadata("admin.target_id", String.format("user:keycloak:%s:%s", realmId, target.id()));
+            }
+            return;
+        }
+
+        String targetId = serviceAccountEntityId(realmId, targetClientId);
+        humiEvent.addMetadata("admin.target_type", "service_account");
+        humiEvent.addMetadata("admin.target_id", targetId);
+        humiEvent.addMetadata("admin.self_change", String.valueOf(targetId.equals(humiEvent.getEntityId())));
+
+        if (AdminChange.PRIVILEGE_GRANTED.equals(change)) {
+            // the representation of the granted roles is present only when the realm records it
+            Boolean privileged = safe(() -> resolver.containsPrivilegedRole(realmId, adminEvent.getRepresentation()));
+            if (privileged != null) humiEvent.addMetadata("admin.privileged_role", privileged.toString());
+        }
+    }
+
+    private static String serviceAccountEntityId(String realmId, String clientId) {
+        return String.format("service_account:keycloak:%s:%s", realmId, clientId);
+    }
+
+    /** A resolver answer, or null: a lookup failure must never lose the event. */
+    private static <T> T safe(java.util.function.Supplier<T> lookup) {
+        try {
+            return lookup.get();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     // ----------------------------------------------------------------
-    // Feedback event → HumifortisEvent
-    // Same data model contract as all other events.
+    // Step-up outcome → HumifortisEvent
     // ----------------------------------------------------------------
 
+    /** A step-up challenge the step-up router ran, completed: the login it concluded. */
+    public static final String STEP_UP_SUCCEEDED = "mfa_challenge_succeeded";
+    /** A step-up challenge answered wrongly (wrong code, failed WebAuthn assertion). */
+    public static final String STEP_UP_FAILED = "mfa_challenge_failed";
+
     /**
-     * Synthetic auth_mfa_success event derived from a LOGIN event where MFA was enforced.
+     * The step-up the router ran succeeded: reported from the LOGIN event that concluded the flow, BEFORE the login
+     * success. The router records the method it challenged; without it no step-up ran and nothing is reported.
      *
-     * <p>Emitted BEFORE auth_login_success so the MFA score delta (−15) is applied first.
-     * auth_login_success has delta=0, so order is score-safe regardless.
+     * <p>The event_id is a stable UUID v3 derived from the login event id, so retries never duplicate it.
      *
-     * <p>The event_id is a stable UUID v3 derived from the login event ID so retries
-     * never produce duplicates in humifortis-core.
-     *
-     * @param loginEvent the Keycloak LOGIN event that concluded the MFA flow
-     * @param challengeId optional Verified-Unblock challenge id to bind this MFA to
-     *                    (null/blank for a normal risk-based MFA)
+     * @param method      the factor the router challenged (TOTP, WEBAUTHN, EMAIL_OTP)
+     * @param challengeId the Verified-Unblock challenge the step-up answers, or null
      */
-    public HumifortisEvent fromMfaSuccess(Event loginEvent, String challengeId) {
+    public HumifortisEvent fromStepUpSucceeded(Event loginEvent, String method, String challengeId) {
         HumifortisEvent e = new HumifortisEvent();
 
         String realmId = loginEvent.getRealmId() != null ? loginEvent.getRealmId() : "unknown";
@@ -131,100 +220,22 @@ public class EventMapper {
         e.setEntityId(String.format("user:keycloak:%s:%s", realmId, userId));
         e.setEntityType("user");
         e.setTimestamp(Instant.ofEpochMilli(loginEvent.getTime()).toString());
-        e.setEventType("auth_mfa_success");
+        e.setEventType(STEP_UP_SUCCEEDED);
         e.setSource("keycloak-rba");
-
-        // Stable deterministic UUID — same login event always yields the same mfa_success ID.
         if (loginEvent.getId() != null) {
-            e.setEventId(UUID.nameUUIDFromBytes(
-                    (loginEvent.getId() + ":auth_mfa_success").getBytes()
-            ).toString());
+            e.setEventId(UUID.nameUUIDFromBytes((loginEvent.getId() + ":" + STEP_UP_SUCCEEDED).getBytes()).toString());
         }
+        e.setFlowId(extractFlowId(loginEvent.getDetails(), loginEvent.getSessionId()));
 
-        // flow_id — must match the login event so both events stay in the same flow group.
-        String flowId = extractFlowId(loginEvent.getDetails(), loginEvent.getSessionId());
-        e.setFlowId(flowId);
-
-        addCommonMetadata(e, realmId, loginEvent.getClientId(),
-                loginEvent.getIpAddress(), loginEvent.getSessionId(), null);
+        addCommonMetadata(e, realmId, loginEvent.getClientId(), loginEvent.getIpAddress(), loginEvent.getSessionId(), null);
         addContextMetadata(e, loginEvent.getDetails());
-
-        // Verified-Unblock binding: echo the challenge id + a fresh MFA timestamp so
-        // humifortis-core can (a) match challenge_id and (b) verify mfa_ts > challenge_created_at
-        // before clearing the block. Both are required for a challenge-bound unblock.
-        String mfaTimestamp = Instant.ofEpochMilli(loginEvent.getTime()).toString();
-        e.addMetadata("mfa_timestamp", mfaTimestamp);
+        e.addMetadata("mfa_method", method);
+        // Verified-Unblock binding: the challenge id and a fresh step-up time
+        e.addMetadata("mfa_timestamp", Instant.ofEpochMilli(loginEvent.getTime()).toString());
         if (challengeId != null && !challengeId.isBlank()) {
             e.addMetadata("challenge_id", challengeId);
         }
-
         return e;
-    }
-
-    /** Backward-compatible overload — normal risk-based MFA with no challenge binding. */
-    public HumifortisEvent fromMfaSuccess(Event loginEvent) {
-        return fromMfaSuccess(loginEvent, null);
-    }
-
-    // ----------------------------------------------------------------
-    // Feedback event → HumifortisEvent
-
-    public HumifortisEvent fromFeedback(
-            Event originEvent,
-            String feedbackEventType,
-            String riskScore,
-            String riskLevel,
-            String riskAction,
-            String riskReason) {
-
-        HumifortisEvent humiEvent = new HumifortisEvent();
-
-        String realmId = originEvent.getRealmId() != null
-                ? originEvent.getRealmId() : "unknown";
-        // Prefer userId; fallback to username only if userId is missing
-        String userId = originEvent.getUserId();
-        if (userId == null || userId.isBlank()) {
-            userId = detailOrFallback(originEvent.getDetails(), "userId", null);
-        }
-        if (userId == null || userId.isBlank()) {
-            userId = detailOrFallback(originEvent.getDetails(), "username", "anonymous");
-        }
-
-        humiEvent.setEntityId(
-            String.format("user:keycloak:%s:%s", realmId, userId));
-        humiEvent.setEntityType("user");
-        humiEvent.setTimestamp(
-                Instant.ofEpochMilli(originEvent.getTime()).toString());
-        humiEvent.setEventType(feedbackEventType);
-        humiEvent.setSource("keycloak-rba");
-        // Feedback events are synthetic (created by the connector, not directly by Keycloak),
-        // so we derive a stable UUID v3 from the origin event ID + feedback type.
-        // Same input → same UUID → safe to retry without double-processing.
-        if (originEvent.getId() != null) {
-            String feedbackId = UUID.nameUUIDFromBytes(
-                (originEvent.getId() + ":" + feedbackEventType).getBytes()
-            ).toString();
-            humiEvent.setEventId(feedbackId);
-        }
-
-        addCommonMetadata(humiEvent, realmId, originEvent.getClientId(),
-                originEvent.getIpAddress(), originEvent.getSessionId(), null);
-        addContextMetadata(humiEvent, originEvent.getDetails());
-
-        // flow_id — propagate from origin event so feedback stays in the same flow group
-        String flowId = extractFlowId(originEvent.getDetails(), originEvent.getSessionId());
-        humiEvent.setFlowId(flowId);
-
-        // Risk decision context
-        humiEvent.addMetadata("risk_score",  riskScore);
-        humiEvent.addMetadata("risk_level",  riskLevel);
-        humiEvent.addMetadata("risk_action", riskAction);
-        humiEvent.addMetadata("risk_reason", riskReason);
-        humiEvent.addMetadata("origin_keycloak_event",
-                originEvent.getType() != null
-                        ? originEvent.getType().name() : "UNKNOWN");
-
-        return humiEvent;
     }
 
     // ----------------------------------------------------------------
@@ -245,15 +256,18 @@ public class EventMapper {
                 if (p.contains("credentials"))        yield "mfa_token_enrolled";
                 if (p.contains("role-mappings") && "CREATE".equals(o)) yield "role_assigned";
                 if (p.contains("role-mappings") && "DELETE".equals(o)) yield "role_revoked";
-                if (p.contains("sessions")  && "DELETE".equals(o))     yield "session_clean_logout";
-                if ("DELETE".equals(o))               yield "delete_account";
-                if ("UPDATE".equals(o))               yield "update_credential";
+                // an administrator ending a user's sessions: incident response on the target, never the user's own logout
+                if (p.endsWith("/logout") || (p.contains("sessions") && "DELETE".equals(o))) yield "admin_sessions_revoked";
                 yield "admin_user_action";
             }
             case "CLIENT" -> {
-                if ("CREATE".equals(o)) yield "grant_consent";
                 yield "admin_client_action";
             }
+            case "REALM_ROLE_MAPPING", "CLIENT_ROLE_MAPPING" -> {
+                if ("DELETE".equals(o)) yield "role_revoked";
+                yield "role_assigned";
+            }
+            case "USER_SESSION"        -> "admin_sessions_revoked";
             case "REALM"               -> "realm_modified";
             case "AUTHENTICATION_FLOW" -> "auth_flow_modified";
             case "IDENTITY_PROVIDER"   -> "idp_modified";
@@ -269,6 +283,8 @@ public class EventMapper {
         return switch (eventType) {
             case LOGIN                  -> "auth_login_success";
             case LOGIN_ERROR            -> "auth_login_failed";
+            case CLIENT_LOGIN           -> "auth_login_success";
+            case CLIENT_LOGIN_ERROR     -> "auth_login_failed";
             case LOGOUT                 -> "session_clean_logout";
             case REGISTER               -> "auth_register";
             case UPDATE_PASSWORD        -> "update_credential";
@@ -397,6 +413,24 @@ public class EventMapper {
 
         // Identity provider — federated vs local login context
         putIfPresent(humiEvent, details, "identity_provider");
+    }
+
+    /** The context of a service account (client_credentials) request: how it authenticated and what it asked for. */
+    private void addServiceAccountMetadata(HumifortisEvent humiEvent, Map<String, String> details) {
+        if (details == null || details.isEmpty()) return;
+        putIfPresent(humiEvent, details, "grant_type");
+        putIfPresent(humiEvent, details, "client_auth_method");
+        // the risk stage already decided this request (core records no second decision)
+        putIfPresent(humiEvent, details, tech.humifortis.keycloak.serviceaccount.ServiceAccountRiskExecutor.DETAIL_DECISION_STAGE);
+        for (String key : ServiceAccountContext.KEYS) {
+            putIfPresent(humiEvent, details, key);
+        }
+    }
+
+    // a request with a session has its flow id from it (enrichEvent); this is the failed authentication (no session)
+    private String serviceAccountFlowId(Event event) {
+        if (event.getId() != null && !event.getId().isBlank()) return event.getId();
+        return String.format("client:%s:%d", event.getClientId(), event.getTime());
     }
 
     private void putIfPresent(

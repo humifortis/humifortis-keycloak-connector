@@ -44,7 +44,7 @@ import tech.humifortis.keycloak.user.UserContextSnapshot;
  * <ul>
  *   <li>{@code HUMIFORTIS_API_URL}    — default {@code https://api.humifortis.com}</li>
  *   <li>{@code HUMIFORTIS_API_KEY}    — required</li>
- *   <li>{@code HUMIFORTIS_TIMEOUT_MS} — default 2000</li>
+ *   <li>{@code HUMIFORTIS_TIMEOUT_MS} — default 800 (one attempt)</li>
  *   <li>{@code HUMIFORTIS_TENANT_ID}  — default realm name</li>
  *   <li>{@code INSECURE_SSL=true}     — skip TLS verification (dev/test only)</li>
  *   <li>{@code HUMIFORTIS_ALLOW_INSECURE_HTTP=true} — permit a non-TLS internal
@@ -584,6 +584,8 @@ public class HumifortisRiskEvaluator {
     private static class EvaluateRequestPayload {
         public EventPayload event;
         public List<String> available_methods;
+        /** What the caller carries out for this request beyond the entity type's executed actions. */
+        public List<String> executors;
     }
 
     private static class EventPayload {
@@ -628,6 +630,8 @@ public class HumifortisRiskEvaluator {
         @SerializedName("policy_source")        public String       policy_source;
         /** The tenant access policy that decided, when one did. */
         @SerializedName("access_policy")        public String       access_policy;
+        /** The decided action is not carried out by anything (shown, not enforced; enforced_action is ALLOW). */
+        @SerializedName("advisory")             public boolean      advisory;
         // ─── Verified-Unblock (admin-initiated step-up) ──────────────────────
         /**
          * Set to REQUIRE_MFA_VERIFICATION when a DENY was downgraded to a step-up MFA
@@ -635,7 +639,7 @@ public class HumifortisRiskEvaluator {
          * risk-based MFA — the connector binds the resulting MFA to the challenge.
          */
         @SerializedName("verification_reason")          public String verification_reason;
-        /** Challenge id to echo back in auth_mfa_success so the server can bind + clear the block. */
+        /** Challenge id to echo back in mfa_challenge_succeeded so the server can bind + clear the block. */
         @SerializedName("verification_challenge_id")    public String verification_challenge_id;
         /** Minimum AAL required to satisfy the challenge (AAL2 default, AAL3 for WebAuthn). */
         @SerializedName("verification_required_level")  public String verification_required_level;
@@ -646,6 +650,64 @@ public class HumifortisRiskEvaluator {
      *                       http_5xx, http_4xx, missing_api_key, insecure_url, null_user, error);
      *                       null when Humifortis answered
      */
+    /** The answer to a service-account token request: the decision, or why there is none. */
+    public record ServiceAccountResult(EvaluateResponse decision, String fallbackReason) {}
+
+    /**
+     * Asks Humifortis for the decision on a service-account token request (the client's own credentials), before the
+     * token is issued. Never throws, never waits longer than the service-account budget.
+     *
+     * @param flowId    the request's (transient) user-session id: the CLIENT_LOGIN of the request carries it too
+     * @param metadata  the context collected by the executor
+     * @param executors what the caller carries out for this request (e.g. DENY)
+     */
+    public ServiceAccountResult evaluateServiceAccount(RealmModel realm, org.keycloak.models.ClientModel client, String flowId,
+                                                       Map<String, Object> metadata, List<String> executors) {
+        if (!config.hasApiKey()) return new ServiceAccountResult(null, "missing_api_key");
+        if (!config.isEndpointAllowed()) {
+            misconfigLog.error(logger, "[Humifortis] HUMIFORTIS_API_URL must be https:// (got " + config.getApiUrl()
+                    + ") — service-account token requests are not evaluated (fallback applies)");
+            return new ServiceAccountResult(null, "insecure_url");
+        }
+        String tenantId = config.tenantIdOr(realm.getName());
+        String callId = UUID.randomUUID().toString();
+        String body;
+        try {
+            EventPayload event = new EventPayload();
+            event.event_id    = callId;
+            event.entity_id   = String.format("service_account:keycloak:%s:%s", realm.getId(), client.getClientId());
+            event.entity_type = "service_account"; // the type the listener sends for CLIENT_LOGIN: same risk key
+            event.event_type  = "auth_credential_verified"; // the client's credentials are valid; no token yet
+            event.source      = "keycloak";
+            event.timestamp   = Instant.now().toString();
+            event.flow_id     = flowId;
+            event.metadata    = metadata;
+            EvaluateRequestPayload payload = new EvaluateRequestPayload();
+            payload.event     = event;
+            payload.executors = executors;
+            body = gson.toJson(payload);
+        } catch (RuntimeException e) {
+            logger.warnf("[HumifortisRiskEvaluator] service-account payload build failed (client=%s): %s", client.getClientId(), e.getMessage());
+            return new ServiceAccountResult(null, "error");
+        }
+        HumifortisTransport.Result result = transport.send(
+                HumifortisTransport.jsonPost(config, "/evaluate", tenantId, body),
+                RetryPolicy.serviceAccount(config), callId);
+        if (!result.ok()) {
+            String reason = result.failure().reason();
+            failureLog.warn(logger, "[Humifortis] no decision for a service-account token request (" + reason
+                    + (result.status() > 0 ? ", HTTP " + result.status() : "") + ") — fallback applies");
+            return new ServiceAccountResult(null, reason);
+        }
+        try {
+            EvaluateResponse decision = gson.fromJson(result.body(), EvaluateResponse.class);
+            return decision != null ? new ServiceAccountResult(decision, null) : new ServiceAccountResult(null, "error");
+        } catch (RuntimeException e) {
+            logger.warnf("[HumifortisRiskEvaluator] unreadable service-account decision (client=%s): %s", client.getClientId(), e.getMessage());
+            return new ServiceAccountResult(null, "error");
+        }
+    }
+
     record EvaluationResult(Risk risk, EvaluateResponse decision, String fallbackReason) {
         static EvaluationResult fallback(String reason) {
             return new EvaluationResult(failOpen(), null, reason);

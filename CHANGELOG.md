@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Admin events by and on a service account**: an Admin API call made with a service account's token is reported with
+  the service account as the actor (`service_account:…`, never a `user` for its internal service-account user). An admin
+  event that changes a service account (role mapping on its user, client secret regeneration, client changes) carries
+  `admin.change`, `admin.actor_type`, `admin.target_type` / `admin.target_id`, `admin.self_change` and, when the realm
+  records representations, `admin.privileged_role`. Lookups are read-only and fail-open.
+- `humifortis.owner` client attribute: forwarded as `service_account.owner` (who owns the client).
+- **Service accounts**: a client authenticating with its own credentials (`client_credentials`;
+  Keycloak `CLIENT_LOGIN` / `CLIENT_LOGIN_ERROR`) is now reported as a `service_account` entity
+  (`service_account:keycloak:<realm>:<clientId>`, `entity_type` stated by the connector) with the
+  event types `auth_login_success` / `auth_login_failed`. Before, these events were not forwarded.
+  The context the service-account detectors need is resolved from the client's attributes
+  (`humifortis.source_allowlist`, `humifortis.baseline_scopes`,
+  `humifortis.expected_window_start_hour_utc` / `_end_hour_utc`, `humifortis.rotation_max_age_days`,
+  and Keycloak's own `client.secret.creation.time`) and the request (IP, granted `scope`), and sent
+  as `service_account.*` metadata. An undeclared or invalid expectation is not sent, so nothing is
+  judged against a guess. See README, "Service accounts".
 ## [1.1.0] — 2026-10-03
 
 ### Added
@@ -36,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every failure path silently allowed the login (fail-open), unreported.
 
 ### Changed
+- An administrator deleting or updating ANOTHER user is now the neutral `admin_user_action` (it was `delete_account` /
+  `update_credential`, i.e. scored on the administrator as if they had deleted their own account).
 - `HUMIFORTIS_TIMEOUT_MS` is the timeout of one attempt (default 800 ms); one configuration
   source for every component. `HUMIFORTIS_FALLBACK_ALLOW` is deprecated.
 

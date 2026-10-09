@@ -435,10 +435,11 @@ public class HumifortisStepUpRouter implements Authenticator {
             try {
                 org.keycloak.events.EventBuilder evt = context.getEvent().clone();
                 evt.event(org.keycloak.events.EventType.LOGIN_ERROR);
-                evt.error(org.keycloak.events.Errors.INVALID_USER_CREDENTIALS);
                 evt.user(context.getUser());
                 evt.detail("method", "EMAIL_OTP");
                 evt.detail("hf_code", HumifortisError.MFA_INVALID_CODE.code);
+                // error() SENDS the event: everything it carries is set before
+                evt.error(org.keycloak.events.Errors.INVALID_USER_CREDENTIALS);
             } catch (Exception ignored) {}
             HumifortisAuditLog.log("mfa_failure", userId, "EMAIL_OTP",
                     "invalid_code", HumifortisError.MFA_INVALID_CODE.code, correlationId,

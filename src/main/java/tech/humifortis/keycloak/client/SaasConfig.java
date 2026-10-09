@@ -16,6 +16,7 @@ import org.jboss.logging.Logger;
  *   <tr><td>HUMIFORTIS_TENANT_ID</td><td>realm name</td><td>tenant</td></tr>
  *   <tr><td>HUMIFORTIS_TIMEOUT_MS</td><td>800</td><td>timeout of ONE attempt</td></tr>
  *   <tr><td>HUMIFORTIS_EVALUATE_BUDGET_MS</td><td>1500</td><td>total time a login may wait for a decision, retries included</td></tr>
+ *   <tr><td>HUMIFORTIS_SA_EVALUATE_BUDGET_MS</td><td>500</td><td>total time a service-account token request may wait for a decision</td></tr>
  *   <tr><td>HUMIFORTIS_FALLBACK</td><td>(tenant policy)</td><td>allow | step_up | deny when Humifortis cannot answer — overrides the tenant policy</td></tr>
  *   <tr><td>HUMIFORTIS_EVENT_QUEUE_SIZE</td><td>10000</td><td>events buffered while the API is unreachable</td></tr>
  * </table>
@@ -28,6 +29,7 @@ public class SaasConfig {
     public static final String DEFAULT_API_URL = "https://api.humifortis.educosmic.tech";
     static final int DEFAULT_ATTEMPT_TIMEOUT_MS = 800;
     static final int DEFAULT_EVALUATE_BUDGET_MS = 1500;
+    static final int DEFAULT_SA_EVALUATE_BUDGET_MS = 500;
     static final int DEFAULT_EVENT_QUEUE_SIZE = 10_000;
 
     private static volatile SaasConfig fromEnv;
@@ -37,6 +39,7 @@ public class SaasConfig {
     private final String tenantId;
     private final int timeoutMs;
     private final int evaluateBudgetMs;
+    private final int saEvaluateBudgetMs;
     private final String fallbackOverride;
     private final int eventQueueSize;
     private final boolean insecureSsl;
@@ -53,6 +56,7 @@ public class SaasConfig {
         this.tenantId = emptyToNull(env.get("HUMIFORTIS_TENANT_ID"));
         this.timeoutMs = positiveInt(env, "HUMIFORTIS_TIMEOUT_MS", DEFAULT_ATTEMPT_TIMEOUT_MS);
         this.evaluateBudgetMs = positiveInt(env, "HUMIFORTIS_EVALUATE_BUDGET_MS", DEFAULT_EVALUATE_BUDGET_MS);
+        this.saEvaluateBudgetMs = positiveInt(env, "HUMIFORTIS_SA_EVALUATE_BUDGET_MS", DEFAULT_SA_EVALUATE_BUDGET_MS);
         this.eventQueueSize = positiveInt(env, "HUMIFORTIS_EVENT_QUEUE_SIZE", DEFAULT_EVENT_QUEUE_SIZE);
         this.fallbackOverride = resolveFallbackOverride(env);
         this.insecureSsl = HttpClientFactory.isInsecureSslEnabled(env.get("INSECURE_SSL"));
@@ -130,6 +134,9 @@ public class SaasConfig {
 
     /** Total time a login waits for a decision, retries included. */
     public int getEvaluateBudgetMs() { return evaluateBudgetMs; }
+
+    /** Total time a service-account token request waits for a decision: machines retry, a token endpoint must stay fast. */
+    public int getServiceAccountEvaluateBudgetMs() { return saEvaluateBudgetMs; }
 
     /** allow | step_up | deny forced by the operator, or null (the tenant policy decides). */
     public String getFallbackOverride() { return fallbackOverride; }

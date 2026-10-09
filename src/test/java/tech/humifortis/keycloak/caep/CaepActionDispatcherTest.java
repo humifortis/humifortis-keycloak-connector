@@ -2,6 +2,7 @@ package tech.humifortis.keycloak.caep;
 
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -161,5 +162,52 @@ class CaepActionDispatcherTest {
         CaepEventRegistry registry = new CaepEventRegistry();
         assertEquals(CaepEventRegistry.ACCOUNT_DISABLED, registry.resolve("https://schemas.openid.net/secevent/risc/event-type/account-disabled"));
         assertEquals(CaepEventRegistry.CREDENTIAL_COMPROMISE, registry.resolve("https://schemas.openid.net/secevent/risc/event-type/credential-compromise"));
+    }
+    // ── a service account's client (subject service_account:keycloak:<realm id>:<client id>) ──────────────
+
+    private static CaepParsedSet clientSubject(String sub) {
+        return new CaepParsedSet("j9", "iss", Set.of("aud"), Instant.now(), Instant.now().plusSeconds(60), sub, null, new JsonObject());
+    }
+
+    /** People's lock switch off: a client follows its own opt-in, not the realm's. */
+    private static final CaepConfig LOCK_OFF = new CaepConfig(true, "iss", "aud", "jwks", 60, true, 600, false, false, false, false, false);
+
+    private static ClientModel client(RealmModel realm, String allowDisable, boolean enabled) {
+        ClientModel c = mock(ClientModel.class);
+        when(realm.getClientByClientId("billing-job")).thenReturn(c);
+        when(c.getAttribute("humifortis.allow_disable")).thenReturn(allowDisable);
+        when(c.isEnabled()).thenReturn(enabled);
+        return c;
+    }
+
+    @Test
+    void anAnalystDisablesAClientThatAllowsIt() {
+        RealmModel realm = mock(RealmModel.class);
+        when(realm.getId()).thenReturn("demo");
+        ClientModel c = client(realm, "true", true);
+        CaepDispatchResult result = new CaepActionDispatcher(mock(KeycloakSession.class))
+                .dispatch(CaepEventRegistry.ACCOUNT_DISABLED, clientSubject("service_account:keycloak:demo:billing-job"), LOCK_OFF, realm);
+        assertEquals("processed", result.processingResult());
+        assertEquals("client_disabled", result.action());
+        verify(c).setEnabled(false);
+        verify(c).setAttribute(eq("humifortis.disabled_by"), eq("analyst"));
+    }
+
+    @Test
+    void aClientThatDoesNotAllowItIsLeftAloneAndTheAnalystIsToldWhy() {
+        RealmModel realm = mock(RealmModel.class);
+        when(realm.getId()).thenReturn("demo");
+        ClientModel c = client(realm, null, true);
+        CaepDispatchResult result = new CaepActionDispatcher(mock(KeycloakSession.class))
+                .dispatch(CaepEventRegistry.ACCOUNT_DISABLED, clientSubject("service_account:keycloak:demo:billing-job"), LOCK_OFF, realm);
+        assertEquals("ignored", result.processingResult());
+        verify(c, never()).setEnabled(anyBoolean());
+
+        RealmModel other = mock(RealmModel.class);
+        when(other.getId()).thenReturn("prod");
+        when(other.getName()).thenReturn("prod");
+        assertEquals("ignored", new CaepActionDispatcher(mock(KeycloakSession.class))
+                .dispatch(CaepEventRegistry.ACCOUNT_DISABLED, clientSubject("service_account:keycloak:demo:billing-job"), LOCK_OFF, other).processingResult(),
+                "a subject of another realm");
     }
 }

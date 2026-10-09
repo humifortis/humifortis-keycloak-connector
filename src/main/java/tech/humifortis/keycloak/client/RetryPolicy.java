@@ -31,6 +31,12 @@ public record RetryPolicy(int maxAttempts, long baseDelayMs, long maxDelayMs, lo
         return new RetryPolicy(3, 50, 400, config.getEvaluateBudgetMs(), config.getTimeoutMs());
     }
 
+    /** A service-account token request: two attempts at most, within its own short budget. */
+    public static RetryPolicy serviceAccount(SaasConfig config) {
+        long budget = config.getServiceAccountEvaluateBudgetMs();
+        return new RetryPolicy(2, 25, 100, budget, Math.min(config.getTimeoutMs(), budget));
+    }
+
     /** One delivery round of a queued event (the queue retries undelivered events later). */
     public static RetryPolicy events(SaasConfig config) {
         return new RetryPolicy(4, 250, 4_000, 15_000, Math.max(config.getTimeoutMs(), 2_000));

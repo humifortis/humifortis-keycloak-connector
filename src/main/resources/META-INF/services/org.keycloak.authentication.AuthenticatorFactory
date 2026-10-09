@@ -1,5 +1,4 @@
 tech.humifortis.keycloak.auth.HumifortisDeviceCollectorFactory
 tech.humifortis.keycloak.auth.HumifortisRiskAuthenticatorFactory
 tech.humifortis.keycloak.auth.HumifortisHighConditionFactory
-tech.humifortis.keycloak.auth.HumifortisRiskConditionFactory
 tech.humifortis.keycloak.auth.HumifortisStepUpRouterFactory

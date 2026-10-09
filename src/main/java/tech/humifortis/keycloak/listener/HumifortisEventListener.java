@@ -3,6 +3,7 @@ package tech.humifortis.keycloak.listener;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.jboss.logging.Logger;
@@ -10,6 +11,7 @@ import org.keycloak.events.Event;
 import org.keycloak.events.EventListenerProvider;
 import org.keycloak.events.EventType;
 import org.keycloak.events.admin.AdminEvent;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
@@ -21,6 +23,7 @@ import tech.humifortis.keycloak.client.SaasClient;
 import tech.humifortis.keycloak.client.SaasConfig;
 import tech.humifortis.keycloak.mapper.EventMapper;
 import tech.humifortis.keycloak.model.HumifortisEvent;
+import tech.humifortis.keycloak.serviceaccount.ServiceAccountContext;
 import tech.humifortis.keycloak.auth.DeviceSignals;
 import tech.humifortis.keycloak.auth.HumifortisDeviceCollectorAuthenticator;
 import tech.humifortis.keycloak.user.UserContextExtractor;
@@ -51,29 +54,12 @@ public class HumifortisEventListener implements EventListenerProvider {
     private static final Logger logger =
             Logger.getLogger(HumifortisEventListener.class);
 
-    // Must match HumifortisRiskAuthenticator constants exactly.
-    private static final String DETAIL_RISK_ACTION  = "HUMIFORTIS_RISK_ACTION";
-    private static final String DETAIL_RISK_SCORE   = "HUMIFORTIS_RISK_SCORE";
-    private static final String DETAIL_RISK_LEVEL   = "HUMIFORTIS_RISK_LEVEL";
-    private static final String DETAIL_RISK_REASON  = "HUMIFORTIS_RISK_REASON";
-    private static final String DETAIL_RISK_BLOCKED = "HUMIFORTIS_RISK_BLOCKED";
-
-    /**
-     * Sentinel stamped by HumifortisRiskAuthenticator when MFA is enforced.
-     * Present in event.getDetails() (via context.getEvent().detail()) AND
-     * in authSession.getAuthNote() — whichever survives the Keycloak flow variant.
-     */
-    private static final String DETAIL_MFA_ENFORCED = "HUMIFORTIS_MFA_ENFORCED";
-
     /**
      * Verified-Unblock challenge id — stamped by HumifortisRiskAuthenticator (dual-source:
-     * event detail + auth session note). Echoed into auth_mfa_success so humifortis-core
+     * event detail + auth session note). Echoed into mfa_challenge_succeeded so humifortis-core
      * can bind the MFA to the admin-initiated challenge and clear the block.
      */
     private static final String DETAIL_CHALLENGE_ID = "HUMIFORTIS_CHALLENGE_ID";
-
-    // Sentinel that identifies our risk-decision event among all CUSTOM_REQUIRED_ACTION_ERROR events.
-    private static final String RISK_EVENT_ERROR = "humifortis_risk_decision";
 
     /**
      * Session note stamped after the first auth_login_success is emitted for a given user session.
@@ -85,6 +71,9 @@ public class HumifortisEventListener implements EventListenerProvider {
     private static final Set<EventType> MONITORED_EVENTS = Set.of(
             EventType.LOGIN,
             EventType.LOGIN_ERROR,
+            // a client authenticating with its own credentials: a service account (client_credentials)
+            EventType.CLIENT_LOGIN,
+            EventType.CLIENT_LOGIN_ERROR,
             EventType.LOGOUT,
             EventType.REGISTER,
             EventType.UPDATE_PASSWORD,
@@ -168,9 +157,10 @@ public class HumifortisEventListener implements EventListenerProvider {
             }
         }
 
-        // Path A: risk decision feedback event (fired by authenticator)
-        if (isRiskDecisionEvent(event)) {
-            emitFeedback(event);
+        // The refusal of a token request by the service-account risk stage: already reported by decision_enforced,
+        // and never a wrong secret (it must not count as credential guessing)
+        if (tech.humifortis.keycloak.serviceaccount.ServiceAccountRiskExecutor.isRiskStageRefusal(
+                event.getType() == EventType.CLIENT_LOGIN_ERROR, event.getError(), event.getDetails())) {
             return;
         }
 
@@ -178,20 +168,28 @@ public class HumifortisEventListener implements EventListenerProvider {
         if (MONITORED_EVENTS.contains(event.getType())) {
             try {
                 enrichEvent(event);
+                if (ServiceAccountContext.isClientCredentialsEvent(event.getType())) {
+                    enrichServiceAccount(event);
+                }
 
-                // MFA interception: when a LOGIN event concludes an MFA-enforced flow,
-                // emit auth_mfa_success FIRST (δ=−15) then auth_login_success (δ=0).
-                // Dual-source check: event detail (set by authenticator) OR authNote (fallback).
-                if (event.getType() == EventType.LOGIN && isMfaEnforced(event)) {
+                // The step-up the router ran in this flow (the factor it challenged), or null when none ran.
+                String stepUpMethod = stepUpMethod();
+
+                // A LOGIN concluding a flow in which the router ran a step-up: the step-up succeeded. Reported
+                // BEFORE the login success (it discharges the evidence the step-up answered).
+                if (event.getType() == EventType.LOGIN && stepUpMethod != null) {
                     String challengeId = resolveChallengeId(event);
-                    HumifortisEvent mfaEvent = eventMapper.fromMfaSuccess(event, challengeId);
-                    sendAsync(mfaEvent, "auth_mfa_success");
-                    logger.debugf("[HumifortisEventListener] Emitted auth_mfa_success before auth_login_success" +
-                            " (user=%s flow_id=%s challenge_id=%s)", event.getUserId(), mfaEvent.getFlowId(),
-                            challengeId != null ? challengeId : "none");
+                    HumifortisEvent stepUp = eventMapper.fromStepUpSucceeded(event, stepUpMethod, challengeId);
+                    sendAsync(stepUp, EventMapper.STEP_UP_SUCCEEDED);
                 }
 
                 HumifortisEvent humiEvent = eventMapper.fromKeycloakEvent(event);
+                // A login error AFTER the step-up was challenged is a failed step-up (a wrong code), never a
+                // wrong password: it is not credential guessing.
+                if (event.getType() == EventType.LOGIN_ERROR && stepUpMethod != null) {
+                    humiEvent.setEventType(EventMapper.STEP_UP_FAILED);
+                    humiEvent.addMetadata("mfa_method", stepUpMethod);
+                }
                 sendAsync(humiEvent, event.getType().name());
             } catch (Exception e) {
                 logger.errorf("[HumifortisEventListener] Error mapping/sending event %s: %s",
@@ -207,7 +205,8 @@ public class HumifortisEventListener implements EventListenerProvider {
     public void onEvent(AdminEvent adminEvent, boolean includeRepresentation) {
         if (disabled) return;
         try {
-            HumifortisEvent humiEvent = eventMapper.fromKeycloakAdminEvent(adminEvent);
+            HumifortisEvent humiEvent = eventMapper.fromKeycloakAdminEvent(adminEvent,
+                    new tech.humifortis.keycloak.serviceaccount.KeycloakAdminIdentityResolver(session));
             sendAsync(humiEvent, "admin:" + adminEvent.getOperationType());
         } catch (Exception e) {
             logger.errorf("[HumifortisEventListener] Error processing admin event: %s",
@@ -293,7 +292,8 @@ public class HumifortisEventListener implements EventListenerProvider {
             }
             if (flowId != null) {
                 event.getDetails().put("authSessionId", flowId);
-            } else {
+            } else if (!ServiceAccountContext.isClientCredentialsEvent(event.getType())) {
+                // a client_credentials request has no browser flow: the mapper derives its flow id
                 logger.warnf("[HumifortisEventListener] flow_id could not be extracted for event type=%s user=%s",
                         event.getType(), event.getUserId());
             }
@@ -365,6 +365,30 @@ public class HumifortisEventListener implements EventListenerProvider {
         }
     }
 
+    /**
+     * Service account (client_credentials) context: what the operator declared on the client,
+     * judged against this request. Only reads the client model — nothing is written to Keycloak.
+     */
+    private void enrichServiceAccount(Event event) {
+        try {
+            // the risk stage decided this request before the token was issued: core records no second decision
+            if (Boolean.TRUE.equals(session.getAttribute(tech.humifortis.keycloak.serviceaccount.ServiceAccountRiskExecutor.SESSION_ATTR_EVALUATED))) {
+                event.getDetails().put(tech.humifortis.keycloak.serviceaccount.ServiceAccountRiskExecutor.DETAIL_DECISION_STAGE,
+                        tech.humifortis.keycloak.serviceaccount.ServiceAccountRiskExecutor.DECISION_STAGE_TOKEN_REQUEST);
+            }
+            RealmModel realm = event.getRealmId() != null ? session.realms().getRealm(event.getRealmId()) : null;
+            if (realm == null) realm = session.getContext().getRealm();
+            if (realm == null || event.getClientId() == null) return;
+            ClientModel client = realm.getClientByClientId(event.getClientId());
+            Map<String, String> attributes = client != null ? client.getAttributes() : null;
+            String ip = event.getIpAddress() != null ? event.getIpAddress() : event.getDetails().get("ip");
+            event.getDetails().putAll(ServiceAccountContext.resolve(
+                    attributes, ip, event.getDetails().get("scope"), Instant.ofEpochMilli(event.getTime())));
+        } catch (Exception e) {
+            logger.debugf("[HumifortisEventListener] service account context failed: %s", e.getMessage());
+        }
+    }
+
     private void mergeDeviceSignalsFromLoginForm(Event event) {
         try {
             String existing = event.getDetails().get("device_id");
@@ -401,42 +425,23 @@ public class HumifortisEventListener implements EventListenerProvider {
         }
     }
 
-    // ── Feedback path ─────────────────────────────────────────────────────────
+    // ── Step-up ───────────────────────────────────────────────────────────────
 
-    private boolean isRiskDecisionEvent(Event event) {
-        return event.getType() == EventType.CUSTOM_REQUIRED_ACTION_ERROR
-                && RISK_EVENT_ERROR.equals(event.getError());
-    }
-
-    /**
-     * Returns true when MFA was enforced by the risk engine during this authentication flow.
-     *
-     * <p>Dual-source check (ordered by reliability):
-     * <ol>
-     *   <li>event detail — set via {@code context.getEvent().detail()} in HumifortisRiskAuthenticator</li>
-     *   <li>auth session note — set via {@code authSession.setAuthNote()} (survives flow transitions)</li>
-     * </ol>
-     */
-    private boolean isMfaEnforced(Event event) {
-        // Source 1: event detail (set during authentication, may be present on the LOGIN event)
-        if (event.getDetails() != null) {
-            String v = event.getDetails().get(DETAIL_MFA_ENFORCED);
-            if ("true".equalsIgnoreCase(v)) return true;
-        }
-        // Source 2: auth session note (more reliable — survives Keycloak MFA sub-flow)
+    /** The factor the step-up router challenged in this authentication session, or null when no step-up ran. */
+    private String stepUpMethod() {
         try {
             var as = session.getContext().getAuthenticationSession();
-            if (as != null) {
-                String v = as.getAuthNote(DETAIL_MFA_ENFORCED);
-                if ("true".equalsIgnoreCase(v)) return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
+            if (as == null) return null;
+            String m = as.getAuthNote(tech.humifortis.keycloak.auth.HumifortisStepUpRouter.NOTE_MFA_METHOD);
+            return m != null && !m.isBlank() ? m : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
      * Resolves the Verified-Unblock challenge id bound to this login (dual-source,
-     * mirroring {@link #isMfaEnforced}). Returns null when no admin verification
+     * mirroring {@link #stepUpMethod}). Returns null when no admin verification
      * window drove this MFA (i.e. a normal risk-based MFA).
      */
     private String resolveChallengeId(Event event) {
@@ -456,105 +461,6 @@ public class HumifortisEventListener implements EventListenerProvider {
         return null;
     }
 
-    private void emitFeedback(Event event) {
-        try {
-            String riskAction = detail(event, DETAIL_RISK_ACTION);
-            String riskScore  = detail(event, DETAIL_RISK_SCORE);
-            String riskLevel  = detail(event, DETAIL_RISK_LEVEL);
-            String riskReason = detail(event, DETAIL_RISK_REASON);
-            String blocked    = detail(event, DETAIL_RISK_BLOCKED);
-
-            if (riskAction == null) {
-                logger.warnf("[HumifortisEventListener] Risk decision event missing " +
-                        "HUMIFORTIS_RISK_ACTION detail — skipping feedback.");
-                return;
-            }
-
-            String feedbackType = resolveFeedbackType(riskAction, blocked);
-
-            logger.infof("[HumifortisEventListener] Emitting feedback: " +
-                            "feedbackType=%s action=%s score=%s level=%s blocked=%s",
-                    feedbackType, riskAction, riskScore, riskLevel, blocked);
-
-            HumifortisEvent feedback = eventMapper.fromFeedback(
-                    event, feedbackType,
-                    riskScore, riskLevel, riskAction, riskReason);
-
-            enrichFeedbackMetadata(feedback, event);
-            sendAsync(feedback, feedbackType);
-
-        } catch (Exception e) {
-            logger.warnf("[HumifortisEventListener] Error emitting feedback event: %s",
-                    e.getMessage());
-        }
-    }
-
-    private String resolveFeedbackType(String riskAction, String blocked) {
-        if ("ALLOW".equalsIgnoreCase(riskAction))
-            return "auth_decision_allow";
-        if ("true".equalsIgnoreCase(blocked)
-                || "DENY".equalsIgnoreCase(riskAction)
-                || "LOCK_ACCOUNT".equalsIgnoreCase(riskAction))
-            return "auth_decision_block";
-        if ("REQUIRE_MFA".equalsIgnoreCase(riskAction)
-                || "REQUIRE_WEBAUTHN".equalsIgnoreCase(riskAction)
-                || "REQUIRE_EMAIL_OTP".equalsIgnoreCase(riskAction))
-            return "auth_decision_mfa";
-        return "auth_decision_evaluated";
-    }
-
-    private void enrichFeedbackMetadata(HumifortisEvent feedback, Event event) {
-        if (event.getDetails() == null) return;
-        // Risk decision context
-        putDetailIfPresent(feedback, event, "playbook_rule");
-        putDetailIfPresent(feedback, event, "enforced_action");
-        putDetailIfPresent(feedback, event, "derived_signals");
-        putDetailIfPresent(feedback, event, "all_actions");
-        putDetailIfPresent(feedback, event, "device_is_new");
-        putDetailIfPresent(feedback, event, "device_is_trusted");
-        putDetailIfPresent(feedback, event, "risk_score_numeric");
-        // Full device context — server correlates risk decisions with device fingerprints
-        // STABLE
-        putDetailIfPresent(feedback, event, "device_id");
-        // CONTEXTUAL
-        putDetailIfPresent(feedback, event, "device_tz");
-        putDetailIfPresent(feedback, event, "device_screen");
-        putDetailIfPresent(feedback, event, "device_lang");
-        putDetailIfPresent(feedback, event, "device_color_depth");
-        // HARDWARE
-        putDetailIfPresent(feedback, event, "device_cpu_cores");
-        putDetailIfPresent(feedback, event, "device_memory_gb");
-        putDetailIfPresent(feedback, event, "device_touch");
-        putDetailIfPresent(feedback, event, "device_platform");
-        putDetailIfPresent(feedback, event, "device_connection");
-        // BEHAVIORAL
-        putDetailIfPresent(feedback, event, "device_load_ms");
-        // v2.3 Math/FPU
-        putDetailIfPresent(feedback, event, "device_math_hash");
-        putDetailIfPresent(feedback, event, "device_fpu_class");
-        putDetailIfPresent(feedback, event, "device_math_anomaly");
-        putDetailIfPresent(feedback, event, "device_math_exec_ms");
-        putDetailIfPresent(feedback, event, "device_math_consistency");
-        // IDENTITY — account age, email verification, MFA methods
-        // These require UserModel lookup — not available in event.getDetails() for feedback events
-        try {
-            UserContextSnapshot userContext = resolveUserContext(event);
-            if (userContext != null) {
-                userContext.writeTo(feedback::addMetadata);
-            }
-        } catch (Exception e) {
-            logger.debugf("[HumifortisEventListener] identity enrichment in feedback failed: %s",
-                    e.getMessage());
-        }
-    }
-
-    private void putDetailIfPresent(HumifortisEvent humiEvent, Event event, String key) {
-        String value = event.getDetails().get(key);
-        if (value != null && !value.isBlank()) {
-            humiEvent.addMetadata(key, value);
-        }
-    }
-
     // ── Shared helpers ────────────────────────────────────────────────────────
 
     private void sendAsync(HumifortisEvent event, String label) {
@@ -563,12 +469,6 @@ public class HumifortisEventListener implements EventListenerProvider {
         } catch (RuntimeException e) {
             logger.warnf("[HumifortisEventListener] Failed to queue [%s]: %s", label, e.getMessage());
         }
-    }
-
-    private String detail(Event event, String key) {
-        if (event.getDetails() == null) return null;
-        String v = event.getDetails().get(key);
-        return (v != null && !v.isBlank()) ? v : null;
     }
 
     private UserContextSnapshot resolveUserContext(Event event) {
@@ -580,20 +480,6 @@ public class HumifortisEventListener implements EventListenerProvider {
         UserModel user = session.users().getUserById(realm, userId);
         if (user == null) return null;
         return userContextExtractor.extract(session, realm, user);
-    }
-
-    /** Copies an AuthNote value into the event details map if the note is present and non-blank. */
-    private void putAuthNote(Event event,
-                             org.keycloak.sessions.AuthenticationSessionModel as,
-                             String noteKey, String detailKey) {
-        try {
-            String value = as.getAuthNote(noteKey);
-            if (value != null && !value.isBlank()) {
-                event.getDetails().put(detailKey, value);
-            }
-        } catch (Exception e) {
-            logger.debugf("[HumifortisEventListener] putAuthNote(%s) failed: %s", noteKey, e.getMessage());
-        }
     }
 
     /**

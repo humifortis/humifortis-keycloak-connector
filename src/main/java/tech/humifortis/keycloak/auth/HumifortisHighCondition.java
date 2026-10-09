@@ -25,7 +25,7 @@ import org.keycloak.models.UserModel;
  * <h3>Contract</h3>
  * {@code matchCondition} returns {@code true} when:
  * <ul>
- *   <li>action is REQUIRE_MFA, REQUIRE_WEBAUTHN, or REQUIRE_EMAIL_OTP — primary check</li>
+ *   <li>action is one of {@link StepUpActions#ALL} — primary check</li>
  *   <li>or risk level is MEDIUM, HIGH, or CRITICAL — fallback for backward compat</li>
  * </ul>
  */
@@ -40,8 +40,7 @@ public class HumifortisHighCondition implements ConditionalAuthenticator {
                                .getAuthNote(HumifortisRiskAuthenticator.NOTE_RISK_ACTION);
 
         if (action != null && !action.isBlank()) {
-            boolean match = switch (action) {
-                case "REQUIRE_MFA", "REQUIRE_WEBAUTHN", "REQUIRE_EMAIL_OTP" -> true;
+            boolean match = StepUpActions.isStepUp(action) || switch (action) {
                 case "ALLOW"                                                 -> false;
                 case "DENY", "LOCK_ACCOUNT"                                  -> false; // handled upstream
                 default                                                      -> true;  // unknown → challenge

@@ -195,9 +195,106 @@ The connector automatically captures and sends these security events to Humifort
 - ✅ Password updates/resets
 - ✅ Email updates/verification
 - ✅ Token operations (refresh, revoke, introspect)
+- ✅ Service account (client_credentials) logins
 - ✅ MFA (TOTP) changes
 - ✅ Account deletion
 - ✅ Admin operations
+
+### Service accounts (client_credentials)
+
+A client that authenticates with its own credentials (Keycloak "Service accounts enabled",
+`client_credentials` grant) is a service account, not a person. Its logins
+(`CLIENT_LOGIN` / `CLIENT_LOGIN_ERROR`) are sent as `auth_login_success` / `auth_login_failed`
+events of a `service_account` entity, `service_account:keycloak:<realm>:<clientId>`. They feed
+detection; with the risk stage enabled (below) each token request is also decided before the token
+is issued.
+
+The operator declares what is normal for the client as **client attributes** (Admin console,
+Clients, the client, Advanced, Attributes — or the REST API / realm import):
+
+| Client attribute | Meaning | Detection it enables |
+|---|---|---|
+| `humifortis.source_allowlist` | Comma-separated IPs or CIDRs the client may call from | `SERVICE_ACCOUNT_SOURCE_OUTSIDE_ALLOWLIST` |
+| `humifortis.baseline_scopes` | Scopes the client is known to use (space or comma separated) | `SERVICE_ACCOUNT_SCOPE_ESCALATION` |
+| `humifortis.expected_window_start_hour_utc`, `humifortis.expected_window_end_hour_utc` | Normal UTC hours of activity, 0-23 (may wrap midnight) | `SERVICE_ACCOUNT_TEMPORAL_ANOMALY` |
+| `humifortis.rotation_max_age_days` | Rotation policy of the secret | `CLIENT_CREDENTIAL_STALE` |
+| `client.secret.creation.time` | Set by Keycloak when the secret is created or rotated (not edited by hand) | `CLIENT_CREDENTIAL_STALE` |
+| `humifortis.owner` | Who owns the client (a team or an e-mail, free text) | shown on the entity page and the alert; never scored |
+
+**Admin events.** An Admin API call made with a service account's token is attributed to the service account (the
+client), never to a `user` for Keycloak's internal service-account user. An admin event that changes a service account
+(role mappings on its user, client secret regeneration, client changes) also carries `admin.change`
+(`privilege_granted`, `privilege_revoked`, `credential_rotated`, `client_config_changed`, `client_deleted`),
+`admin.actor_type`, `admin.target_type` / `admin.target_id`, `admin.self_change` and — when the realm records
+representations (`adminEventsDetailsEnabled`) — `admin.privileged_role`. These lookups only read the Keycloak model
+and fail open: if one fails the event is sent as before.
+
+Each request is judged against the declaration and sent as `service_account.source_allowlist_match`,
+`service_account.requested_scopes`, `service_account.historical_scopes`,
+`service_account.expected_window_*_hour_utc`, `service_account.credential_age_days` and
+`service_account.rotation_max_age_days`. An expectation that is not declared (or not valid) is
+not sent: the detector reports its input as unavailable instead of judging against a guess.
+
+### Service accounts: risk stage
+
+The connector ships a client-policy executor, `humifortis-service-account-risk`. Once a realm enables it, every
+`client_credentials` token request is sent to Humifortis (`auth_credential_verified`, with the context above) after
+Keycloak has checked the client's credentials and **before** the token is issued. The answer is applied as for a
+person's login:
+
+| Decision | Token request |
+|---|---|
+| `DENY` (CRITICAL), mode `enforce` | refused: HTTP 400 `{"error":"access_denied","error_description":"humifortis_risk"}` |
+| `DISABLE_CLIENT` (HIGH, or with `DENY` at CRITICAL), mode `enforce`, client with `humifortis.allow_disable=true` | the client is disabled (attributes `humifortis.disabled_at`, `humifortis.disabled_by`), then the request refused as above |
+| `DENY` in `shadow` / `dry_run` | issued; the report says it would have been denied |
+| anything else (`ALLOW`, `NOTIFY_SOC`, `DISABLE_CLIENT` for a client that does not allow it: advisory) | issued |
+| no answer within the budget | issued (fail-open), unless the client sets `humifortis.fallback=deny` |
+
+Every decision is reported (`decision_enforced` or `decision_fallback_applied`). The request's `CLIENT_LOGIN` is
+sent as before, in the same flow, and is not decided a second time. A refusal does not produce a failed client login:
+it is not a guessed secret.
+
+**Enable it in a realm** — one client profile holding the executor and one client policy applying it to every client
+(clients without "Service accounts enabled" are ignored). In a realm import:
+
+```json
+"clientProfiles": { "profiles": [ {
+  "name": "humifortis-service-account",
+  "executors": [ { "executor": "humifortis-service-account-risk", "configuration": {} } ]
+} ] },
+"clientPolicies": { "policies": [ {
+  "name": "humifortis-service-account", "enabled": true,
+  "conditions": [ { "condition": "any-client", "configuration": {} } ],
+  "profiles": [ "humifortis-service-account" ]
+} ] }
+```
+
+or in the Admin console: Realm settings, Client policies, Profiles (add the profile and its executor), then Policies
+(add the policy with the *Any client* condition and the profile). With `kcadm.sh`, `update
+realms/<realm>/client-policies/profiles -f profiles.json` and `update realms/<realm>/client-policies/policies -f
+policies.json` (both replace the realm's lists: include the profiles and policies you already have).
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `HUMIFORTIS_SA_EVALUATE_BUDGET_MS` (env) | `500` | Longest a token request waits for a decision, retries included (ms) |
+| `humifortis.enforcement` (client attribute) | — | `off` exempts the client: never evaluated, never refused (its logins still feed detection) |
+| `humifortis.fallback` (client attribute) | `allow` | `deny` refuses the token when Humifortis cannot answer |
+| `humifortis.allow_disable` (client attribute) | — | `true` lets a decision, or an analyst from the alert, disable the client |
+
+**Disabled clients.** A disabled client is refused by Keycloak itself until an operator re-enables it (Admin console,
+Clients, the client, *Enabled*), after clearing its risk in Humifortis — otherwise the next request is decided again on
+the same risk. Tokens already issued stay valid until they expire. A client already disabled is not touched, and an
+exempt client (`humifortis.enforcement=off`) is never disabled.
+
+**Analyst response.** The alert page of a service account offers *Disable the client*: Humifortis sends a RISC
+`account-disabled` security event with the subject `service_account:keycloak:<realm id>:<client id>` over the CAEP
+stream, and the receiver disables the client under the same `humifortis.allow_disable` opt-in (the realm switch
+`hf.caep.enforce.accountDisabled` is about people's accounts). A client that does not allow it is answered
+`processing: ignored` with the reason, and the alert shows that nothing was done.
+
+Keycloak marks the client-policy executor SPI as internal (warning `KC-SERVICES0047` at boot); the stage is tested on
+each supported Keycloak version. When building from source, use `mvn clean package`: a stale service-provider file
+left in `target/` stops Keycloak from booting.
 
 ### Risk-Based Authentication
 
@@ -285,7 +382,7 @@ humifortis-keycloak-connector/
 │   │   ├── DeviceSignals.java                       ← reads/validates device signals (all paths)
 │   │   ├── HumifortisRiskAuthenticator.java         ← asks Humifortis for the decision
 │   │   ├── HumifortisRiskEvaluator.java
-│   │   ├── HumifortisStepUpRouter.java / HumifortisHighCondition.java / HumifortisRiskCondition.java
+│   │   ├── HumifortisStepUpRouter.java / HumifortisHighCondition.java / StepUpActions.java
 │   │   └── *Factory.java
 │   ├── client/
 │   │   ├── SaasClient.java

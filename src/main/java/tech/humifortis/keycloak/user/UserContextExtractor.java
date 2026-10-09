@@ -177,6 +177,13 @@ public class UserContextExtractor {
         return null;
     }
 
+    /** Whether a role counts as privileged here: the built-in admin roles and the realm's extra privileged roles. */
+    public static boolean isPrivilegedRole(RealmModel realm, RoleModel role) {
+        String name = roleName(role);
+        if (name == null) return false;
+        return isBuiltInPrivileged(name) || csv(realm.getAttribute(ATTR_PRIVILEGED_ROLES)).contains(name);
+    }
+
     /** A built-in admin role: a realm role, or a role of Keycloak's admin clients. */
     static boolean isBuiltInPrivileged(String role) {
         int colon = role.indexOf(':');

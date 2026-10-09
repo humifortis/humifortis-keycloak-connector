@@ -1,9 +1,12 @@
 package tech.humifortis.keycloak.caep;
 
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
+
+import tech.humifortis.keycloak.serviceaccount.ClientContainment;
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -56,8 +59,12 @@ public class CaepActionDispatcher {
         }
     }
 
-    /** An analyst locked the account: disable the Keycloak user and end its sessions. */
+    /** The subject prefix of a service account: {@code service_account:keycloak:<realm id>:<client id>}. */
+    static final String SERVICE_ACCOUNT_SUBJECT = "service_account:keycloak:";
+
+    /** An analyst locked the account: disable the Keycloak user and end its sessions — or, for a service account, its client. */
     private CaepDispatchResult handleAccountDisabled(CaepParsedSet set, CaepConfig config, RealmModel realm) {
+        if (set.subject() != null && set.subject().startsWith(SERVICE_ACCOUNT_SUBJECT)) return handleClientDisabled(set.subject(), realm);
         if (!config.enforceAccountDisabled()) return CaepDispatchResult.noAction("account lock enforcement disabled (hf.caep.enforce.accountDisabled)");
         try {
             UserModel user = targetUser(set, realm);
@@ -67,6 +74,29 @@ public class CaepActionDispatcher {
             return CaepDispatchResult.success("account_disabled");
         } catch (Exception e) {
             return CaepDispatchResult.failed("account_disabled", messageOf(e));
+        }
+    }
+
+    /**
+     * An analyst disabled a service account's client. The client's own opt-in decides
+     * ({@code humifortis.allow_disable=true}, not exempt), not the realm switch of people's accounts.
+     */
+    private CaepDispatchResult handleClientDisabled(String subject, RealmModel realm) {
+        String[] parts = subject.substring(SERVICE_ACCOUNT_SUBJECT.length()).split(":", 2);
+        if (parts.length != 2 || parts[1].isBlank()) return CaepDispatchResult.noAction("malformed service-account subject");
+        if (!parts[0].equals(realm.getId()) && !parts[0].equals(realm.getName())) {
+            return CaepDispatchResult.noAction("the client belongs to another realm");
+        }
+        try {
+            ClientModel client = realm.getClientByClientId(parts[1]);
+            if (client == null) return CaepDispatchResult.noAction("target client not found");
+            return switch (ClientContainment.disable(client, "analyst")) {
+                case DISABLED -> CaepDispatchResult.success("client_disabled");
+                case ALREADY_DISABLED -> CaepDispatchResult.noAction("client already disabled");
+                case NOT_ALLOWED -> CaepDispatchResult.noAction("the client does not allow it (" + ClientContainment.ATTR_ALLOW_DISABLE + ")");
+            };
+        } catch (Exception e) {
+            return CaepDispatchResult.failed("client_disabled", messageOf(e));
         }
     }
 
