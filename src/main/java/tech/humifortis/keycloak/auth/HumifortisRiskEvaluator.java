@@ -586,6 +586,14 @@ public class HumifortisRiskEvaluator {
         public List<String> available_methods;
         /** What the caller carries out for this request beyond the entity type's executed actions. */
         public List<String> executors;
+        /** Actions the caller could carry out but does not for this request, with why (DISABLE_CLIENT: client_not_opted_in). */
+        public Map<String, String> declined_executors;
+    }
+
+    /** A decided action that was not carried out, and why (core's closed set of reasons). */
+    public static class NotEnforcedItem {
+        public String action;
+        public String reason;
     }
 
     private static class EventPayload {
@@ -632,6 +640,8 @@ public class HumifortisRiskEvaluator {
         @SerializedName("access_policy")        public String       access_policy;
         /** The decided action is not carried out by anything (shown, not enforced; enforced_action is ALLOW). */
         @SerializedName("advisory")             public boolean      advisory;
+        /** The decided actions nothing carried out for this request, each with why: copied verbatim into the report. */
+        @SerializedName("not_enforced")         public List<NotEnforcedItem> not_enforced;
         // ─── Verified-Unblock (admin-initiated step-up) ──────────────────────
         /**
          * Set to REQUIRE_MFA_VERIFICATION when a DENY was downgraded to a step-up MFA
@@ -660,9 +670,11 @@ public class HumifortisRiskEvaluator {
      * @param flowId    the request's (transient) user-session id: the CLIENT_LOGIN of the request carries it too
      * @param metadata  the context collected by the executor
      * @param executors what the caller carries out for this request (e.g. DENY)
+     * @param declined  what it could carry out but does not for this request, with why
      */
     public ServiceAccountResult evaluateServiceAccount(RealmModel realm, org.keycloak.models.ClientModel client, String flowId,
-                                                       Map<String, Object> metadata, List<String> executors) {
+                                                       Map<String, Object> metadata, List<String> executors,
+                                                       Map<String, String> declined) {
         if (!config.hasApiKey()) return new ServiceAccountResult(null, "missing_api_key");
         if (!config.isEndpointAllowed()) {
             misconfigLog.error(logger, "[Humifortis] HUMIFORTIS_API_URL must be https:// (got " + config.getApiUrl()
@@ -685,6 +697,7 @@ public class HumifortisRiskEvaluator {
             EvaluateRequestPayload payload = new EvaluateRequestPayload();
             payload.event     = event;
             payload.executors = executors;
+            payload.declined_executors = declined == null || declined.isEmpty() ? null : declined;
             body = gson.toJson(payload);
         } catch (RuntimeException e) {
             logger.warnf("[HumifortisRiskEvaluator] service-account payload build failed (client=%s): %s", client.getClientId(), e.getMessage());

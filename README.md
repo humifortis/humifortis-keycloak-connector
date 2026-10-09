@@ -250,7 +250,7 @@ person's login:
 | anything else (`ALLOW`, `NOTIFY_SOC`, `DISABLE_CLIENT` for a client that does not allow it: advisory) | issued |
 | no answer within the budget | issued (fail-open), unless the client sets `humifortis.fallback=deny` |
 
-Every decision is reported (`decision_enforced` or `decision_fallback_applied`). The request's `CLIENT_LOGIN` is
+Every decision is reported (`decision_enforced` or `decision_fallback_applied`), with what was decided (`requested_action`), what happened to the request (`enforced_action`) and, in `not_enforced`, every decided action that was not carried out and why (`DISABLE_CLIENT:client_not_opted_in`, `DENY:mode_shadow`): an "allowed" request whose rule asked for containment says so. The request's `CLIENT_LOGIN` is
 sent as before, in the same flow, and is not decided a second time. A refusal does not produce a failed client login:
 it is not a guessed secret.
 

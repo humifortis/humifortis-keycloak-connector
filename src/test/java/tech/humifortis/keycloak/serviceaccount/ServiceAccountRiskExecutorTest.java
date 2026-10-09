@@ -120,6 +120,41 @@ class ServiceAccountRiskExecutorTest {
         assertEquals(ClientContainment.Result.ALREADY_DISABLED, ClientContainment.disable(c, "analyst"));
     }
 
+    private static HumifortisRiskEvaluator.EvaluateResponse withNotEnforced(String... items) {
+        HumifortisRiskEvaluator.EvaluateResponse r = new HumifortisRiskEvaluator.EvaluateResponse();
+        r.not_enforced = new ArrayList<>();
+        for (String it : items) {
+            HumifortisRiskEvaluator.NotEnforcedItem n = new HumifortisRiskEvaluator.NotEnforcedItem();
+            n.action = it.substring(0, it.indexOf(':'));
+            n.reason = it.substring(it.indexOf(':') + 1);
+            r.not_enforced.add(n);
+        }
+        return r;
+    }
+
+    @Test
+    void theReportCopiesWhatCoreSaidWasNotEnforcedAndAddsOnlyTheModeThatLetTheRequestThrough() {
+        // core's list is copied verbatim: a decided DISABLE_CLIENT the client did not allow
+        assertEquals("DISABLE_CLIENT:client_not_opted_in",
+                ServiceAccountRiskExecutor.notEnforced(withNotEnforced("DISABLE_CLIENT:client_not_opted_in"), "enforce", "ALLOW"));
+        // nothing left out: an empty string, no key in the report
+        assertEquals("", ServiceAccountRiskExecutor.notEnforced(withNotEnforced(), "enforce", "DENY"));
+        assertEquals("", ServiceAccountRiskExecutor.notEnforced(null, "enforce", "ALLOW"));
+        // shadow / dry run: the enforced DENY was not applied, said once with the mode
+        assertEquals("DENY:mode_shadow", ServiceAccountRiskExecutor.notEnforced(withNotEnforced(), "shadow", "DENY"));
+        assertEquals("DENY:mode_dry_run", ServiceAccountRiskExecutor.notEnforced(withNotEnforced(), "dry_run", "DENY"));
+        // an ALLOW is never reported as not enforced, in any mode
+        assertEquals("", ServiceAccountRiskExecutor.notEnforced(withNotEnforced(), "shadow", "ALLOW"));
+        // both, in order, without duplicates
+        assertEquals("DISABLE_CLIENT:client_not_opted_in,DENY:mode_shadow",
+                ServiceAccountRiskExecutor.notEnforced(withNotEnforced("DISABLE_CLIENT:client_not_opted_in"), "shadow", "DENY"));
+    }
+
+    @Test
+    void aClientThatDidNotAllowDisablingTellsCoreWhyTheActionIsNotCarriedOut() {
+        assertEquals(Map.of("DISABLE_CLIENT", "client_not_opted_in"), ServiceAccountRiskExecutor.DECLINED_NOT_OPTED_IN);
+    }
+
     @Test
     void withoutAnAnswerTheTokenIsIssuedUnlessTheClientSaysDeny() {
         ServiceAccountRiskExecutor.Decision open = ServiceAccountRiskExecutor.decide(noAnswer("timeout"), null, false);
@@ -174,6 +209,7 @@ class ServiceAccountRiskExecutorTest {
         final ClientModel client = mock(ClientModel.class);
         final List<Sent> reports = new ArrayList<>();
         final List<List<String>> executorsSent = new ArrayList<>();
+        final List<Map<String, String>> declinedSent = new ArrayList<>();
         HumifortisRiskEvaluator.ServiceAccountResult result;
 
         Fixture() {
@@ -190,8 +226,9 @@ class ServiceAccountRiskExecutorTest {
 
         ServiceAccountRiskExecutor executor() {
             return new ServiceAccountRiskExecutor(session,
-                    (r, c, flowId, md, executors) -> {
+                    (r, c, flowId, md, executors, declined) -> {
                         executorsSent.add(executors);
+                        declinedSent.add(declined);
                         return result;
                     },
                     (type, entityId, flowId, r, requested, enforced, mode, extra) -> {

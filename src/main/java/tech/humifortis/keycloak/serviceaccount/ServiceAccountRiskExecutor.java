@@ -66,6 +66,8 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
     static final List<String> EXECUTORS = List.of("DENY");
     /** ... and for a client that lets Humifortis disable it. */
     static final List<String> EXECUTORS_WITH_DISABLE = List.of("DENY", "DISABLE_CLIENT");
+    /** The reason core reports for a decided DISABLE_CLIENT that this stage could carry out but the client did not allow. */
+    static final Map<String, String> DECLINED_NOT_OPTED_IN = Map.of("DISABLE_CLIENT", "client_not_opted_in");
 
     private final KeycloakSession session;
     private final Evaluate evaluate;
@@ -74,7 +76,8 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
     /** The /evaluate call (replaced in tests). */
     interface Evaluate {
         HumifortisRiskEvaluator.ServiceAccountResult call(RealmModel realm, ClientModel client, String flowId,
-                                                           Map<String, Object> metadata, List<String> executors);
+                                                           Map<String, Object> metadata, List<String> executors,
+                                                           Map<String, String> declined);
     }
 
     /** The decision report (replaced in tests). */
@@ -85,8 +88,8 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
 
     public ServiceAccountRiskExecutor(KeycloakSession session) {
         this(session,
-                (realm, client, flowId, md, executors) -> new HumifortisRiskEvaluator(session)
-                        .evaluateServiceAccount(realm, client, flowId, md, executors),
+                (realm, client, flowId, md, executors, declined) -> new HumifortisRiskEvaluator(session)
+                        .evaluateServiceAccount(realm, client, flowId, md, executors, declined),
                 (type, entityId, flowId, realm, requested, enforced, mode, extra) -> {
                     SaasConfig config = SaasConfig.fromEnv();
                     EventQueue.shared(config).submit(DecisionReport.build(type, entityId, DecisionReport.SERVICE_ACCOUNT,
@@ -127,7 +130,8 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
         Map<String, Object> metadata = collect(realm, client, requestedScope);
         boolean allowDisable = ClientContainment.allowsDisable(client);
         HumifortisRiskEvaluator.ServiceAccountResult result = evaluate.call(realm, client, flowId, metadata,
-                allowDisable ? EXECUTORS_WITH_DISABLE : EXECUTORS);
+                allowDisable ? EXECUTORS_WITH_DISABLE : EXECUTORS,
+                allowDisable ? Map.of() : DECLINED_NOT_OPTED_IN);
         session.setAttribute(SESSION_ATTR_EVALUATED, Boolean.TRUE);
 
         Decision d = decide(result, attr(client, ATTR_FALLBACK), allowDisable);
@@ -143,6 +147,8 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
             extra.put("risk_score", String.valueOf(r.risk_score));
             extra.put("advisory", String.valueOf(r.advisory));
             if (r.actions != null && !r.actions.isEmpty()) extra.put("all_actions", String.join(",", r.actions));
+            String notEnforced = notEnforced(r, d.mode, d.enforced);
+            if (!notEnforced.isEmpty()) extra.put("not_enforced", notEnforced);
         } else {
             extra.put("fallback_reason", result.fallbackReason());
             extra.put("fallback_outcome", d.refuse ? "deny" : "allow");
@@ -171,6 +177,24 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
                     result.decision() != null ? result.decision().playbook_rule : "fallback " + result.fallbackReason());
             throw new ClientPolicyException("access_denied", DENY_DESCRIPTION);
         }
+    }
+
+    /**
+     * The decided actions nothing carried out for this request, "ACTION:reason" comma-separated: core's list copied
+     * verbatim (it knows the entity type's executors and the caller's declarations), plus the enforced action itself
+     * when the mode lets the request through (shadow, dry run). The stage derives nothing else.
+     */
+    static String notEnforced(HumifortisRiskEvaluator.EvaluateResponse r, String mode, String enforced) {
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        if (r != null && r.not_enforced != null) {
+            for (HumifortisRiskEvaluator.NotEnforcedItem n : r.not_enforced) {
+                if (n != null && n.action != null && n.reason != null) out.add(n.action + ":" + n.reason);
+            }
+        }
+        if (!DecisionReport.applied(mode) && enforced != null && !enforced.isBlank() && !"ALLOW".equals(enforced)) {
+            out.add(enforced + ":mode_" + mode);
+        }
+        return String.join(",", out);
     }
 
     /** What the stage does with the answer (pure; unit-tested): refuse the request, and disable the client first. */
