@@ -434,3 +434,18 @@ For assistance:
 - Email: support@humifortis.tech
 - Documentation: https://docs.humifortis.tech/connectors/keycloak
 - GitHub Issues: https://github.com/humifortis/keycloak-connector/issues
+
+## Which Humifortis call does the connector make
+
+The connector uses the two calls of the Humifortis API for two different jobs. The rule is: **if the answer changes
+what you do, it is `POST /evaluate`; if not, it is `POST /events`.**
+
+| You need to... | Call |
+|---|---|
+| allow, step up or deny a sign-in, a token request or an admin action now | `POST /evaluate` (one event, answers with a decision) |
+| tell Humifortis about something that already happened (a logout, an MFA enrolment, a password change, a failed attempt after the fact) | `POST /events` |
+| send many events at once, or from a queue | `POST /events` (up to 100 per call) |
+
+Both take the same `event` object. `POST /evaluate` adds the caller's context (the MFA profile and the executors) and
+does not take batches. Only `POST /evaluate` returns an action, so a login that must be enforced is never sent to
+`POST /events`.
