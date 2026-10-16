@@ -17,6 +17,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.annotations.SerializedName;
 
+import tech.humifortis.keycloak.client.EdgeRtt;
 import tech.humifortis.keycloak.client.HumifortisTransport;
 import tech.humifortis.keycloak.client.ProxySettings;
 import tech.humifortis.keycloak.client.RateLimitedLog;
@@ -230,6 +231,21 @@ public class HumifortisRiskEvaluator {
             String ua = headers.getHeaderString("User-Agent");
             return (ua != null && !ua.isBlank()) ? ua : null;
         });
+
+        // Round trip time: the edge's (X-Edge-RTT-Ms), else the browser's (device collector). Absent: not evaluated.
+        try {
+            var as = session.getContext().getAuthenticationSession();
+            EdgeRtt.Measure rtt = EdgeRtt.resolve(session.getContext().getRequestHeaders(),
+                    as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_RTT_MS) : null);
+            if (rtt != null) {
+                meta.put(EdgeRtt.METADATA_KEY, rtt.ms());
+                meta.put(EdgeRtt.SOURCE_KEY, rtt.source());
+            }
+            Integer browser = EdgeRtt.browser(as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_RTT_MS) : null);
+            if (browser != null) meta.put(EdgeRtt.BROWSER_KEY, browser);
+        } catch (RuntimeException e) {
+            logger.debugf("[HumifortisRiskEvaluator] RTT unavailable: %s", e.getMessage());
+        }
 
         // Auth session data
         safeCollect(meta, "session_id", () -> {

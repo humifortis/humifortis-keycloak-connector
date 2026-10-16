@@ -184,11 +184,37 @@ async function collectSignals(out) {
 
     // ── BEHAVIORAL ────────────────────────────────────────────────────────────
     setField('device_load_ms', safeGet(() => String(Date.now() - PAGE_LOAD_AT)))
+    setField('device_rtt_ms', await measureRtt())
     setField('device_signals', JSON.stringify(buildSignalsSubset(result.components, out)))
   } catch (err) {
     console.debug('[Humifortis] FingerprintJS error (non-blocking):', err)
   }
   return out
+}
+
+/**
+ * Round trip to this Keycloak, for the case where no proxy measures it: the shortest of a few sequential, uncached
+ * HEAD requests to a tiny same-origin document (the first one pays for the connection and is dropped). The shortest
+ * sample is the one least inflated by the browser and the server, so it is never below the real round trip; a client
+ * can only make it longer. Fail-open: null (not evaluated) on any error.
+ */
+async function measureRtt() {
+  try {
+    const m = /^(.*\/realms\/[^/]+)\//.exec(location.pathname)
+    if (!m || typeof fetch !== 'function') return null
+    const url = `${location.origin}${m[1]}/.well-known/openid-configuration`
+    let best = Infinity
+    for (let i = 0; i < 4; i++) {
+      const t0 = performance.now()
+      const res = await fetch(url, { method: 'HEAD', cache: 'no-store', credentials: 'omit' })
+      const dt = performance.now() - t0
+      if (!res.ok) return null
+      if (i > 0 && dt < best) best = dt
+    }
+    return Number.isFinite(best) ? String(Math.max(0, Math.round(best))) : null
+  } catch (_) {
+    return null
+  }
 }
 
 /** Anti-replay binding: SHA-256(nonce:timestamp:visitorId), recomputed by the server. */

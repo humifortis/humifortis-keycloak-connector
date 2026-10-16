@@ -59,6 +59,7 @@ public final class DeviceSignals {
         m.put("device_webgl_vendor", NOTE_DEVICE_WEBGL_VENDOR);
         m.put("device_webgl_renderer", NOTE_DEVICE_WEBGL_RENDERER);
         m.put("device_load_ms", NOTE_DEVICE_LOAD_MS);
+        m.put("device_rtt_ms", NOTE_DEVICE_RTT_MS);
         m.put("device_touch_points", NOTE_DEVICE_TOUCH_POINTS);
         m.put("device_orientation", NOTE_DEVICE_ORIENTATION);
         m.put("device_hash_perf_ms", NOTE_DEVICE_HASH_PERF_MS);

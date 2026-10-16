@@ -3,12 +3,18 @@ package tech.humifortis.keycloak.caep;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.UserLoginFailureModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+
 import tech.humifortis.keycloak.serviceaccount.ClientContainment;
 
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 public class CaepActionDispatcher {
@@ -25,6 +31,7 @@ public class CaepActionDispatcher {
             case CaepEventRegistry.RISK_LEVEL_CHANGE -> handleStepUp(set, config, realm);
             case CaepEventRegistry.ACCOUNT_DISABLED -> handleAccountDisabled(set, config, realm);
             case CaepEventRegistry.CREDENTIAL_COMPROMISE -> handleCredentialCompromise(set, config, realm);
+            case CaepEventRegistry.THROTTLE -> handleThrottle(set, realm);
             default -> CaepDispatchResult.noAction("unsupported event");
         };
     }
@@ -112,6 +119,58 @@ public class CaepActionDispatcher {
         } catch (Exception e) {
             return CaepDispatchResult.failed("password_reset_required", messageOf(e));
         }
+    }
+
+    /**
+     * A tenant policy asked to restrict the user's attempts until a deadline: drive Keycloak's native temporary
+     * lockout ({@code failedLoginNotBefore}). The deadline only ever moves forward (a redelivered or older event
+     * never shortens it); a lift clears it. The password is never looked at while locked out.
+     */
+    private CaepDispatchResult handleThrottle(CaepParsedSet set, RealmModel realm) {
+        if (set.subject() != null && set.subject().startsWith(SERVICE_ACCOUNT_SUBJECT)) {
+            // a client_credentials request does not go through the user login form: not enforceable here
+            return CaepDispatchResult.noAction("throttle_unsupported_for_entity_type");
+        }
+        JsonObject body = throttleBody(set);
+        if (body == null) return CaepDispatchResult.noAction("malformed throttle event");
+        boolean lifted = body.has("lifted") && body.get("lifted").isJsonPrimitive() && body.get("lifted").getAsBoolean();
+        long until = body.has("until") && body.get("until").isJsonPrimitive() ? body.get("until").getAsLong() : 0L;
+        try {
+            UserModel user = targetUser(set, realm);
+            if (user == null) return CaepDispatchResult.noAction("target user not found");
+            UserLoginFailureModel failure = session.loginFailures().getUserLoginFailure(realm, user.getId());
+            if (lifted) {
+                // lifting needs no realm flag: it only clears what a throttle set
+                if (failure == null || failure.getFailedLoginNotBefore() == 0) return CaepDispatchResult.noAction("no throttle in force");
+                // the record is removed, not zeroed: the login-failure cache merges updates by their maximum, so a
+                // deadline written back as 0 would be lost
+                session.loginFailures().removeUserLoginFailure(realm, user.getId());
+                return CaepDispatchResult.success("throttle_lifted");
+            }
+            if (!realm.isBruteForceProtected()) {
+                // without the flag Keycloak never consults failedLoginNotBefore: say so, do not imply protection
+                return CaepDispatchResult.noAction(ThrottleLockout.REASON_REALM_BRUTEFORCE_DISABLED);
+            }
+            if (until <= Instant.now().getEpochSecond()) return CaepDispatchResult.noAction("throttle already over");
+            if (failure == null) failure = session.loginFailures().addUserLoginFailure(realm, user.getId());
+            if (failure.getFailedLoginNotBefore() >= until) return CaepDispatchResult.success("throttle_already_in_force");
+            failure.setFailedLoginNotBefore((int) Math.min(until, Integer.MAX_VALUE));
+            return CaepDispatchResult.success("throttle");
+        } catch (Exception e) {
+            return CaepDispatchResult.failed("throttle", messageOf(e));
+        }
+    }
+
+    /** The body of the throttle event inside the SET's {@code events} claim. */
+    private static JsonObject throttleBody(CaepParsedSet set) {
+        if (set.events() == null) return null;
+        CaepEventRegistry registry = new CaepEventRegistry();
+        for (Map.Entry<String, JsonElement> entry : set.events().entrySet()) {
+            if (CaepEventRegistry.THROTTLE.equals(registry.resolve(entry.getKey())) && entry.getValue().isJsonObject()) {
+                return entry.getValue().getAsJsonObject();
+            }
+        }
+        return null;
     }
 
     private UserModel targetUser(CaepParsedSet set, RealmModel realm) {

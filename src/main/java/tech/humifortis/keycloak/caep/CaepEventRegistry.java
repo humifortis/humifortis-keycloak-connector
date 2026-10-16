@@ -9,6 +9,8 @@ public class CaepEventRegistry {
     // RISC (account lifecycle) events an analyst response can send: lock an account, force a new password
     static final String ACCOUNT_DISABLED = "account-disabled";
     static final String CREDENTIAL_COMPROMISE = "credential-compromise";
+    // Humifortis event: a bounded time restriction on an entity's attempts (the standards have no temporary lockout)
+    static final String THROTTLE = "throttle";
 
     private static final Map<String, String> URI_TO_EVENT = Map.ofEntries(
             Map.entry("https://schemas.openid.net/secevent/caep/event-type/session-revoked", SESSION_REVOKED),
@@ -23,7 +25,9 @@ public class CaepEventRegistry {
             Map.entry("https://schemas.openid.net/secevent/risc/event-type/account-disabled", ACCOUNT_DISABLED),
             Map.entry("account-disabled", ACCOUNT_DISABLED),
             Map.entry("https://schemas.openid.net/secevent/risc/event-type/credential-compromise", CREDENTIAL_COMPROMISE),
-            Map.entry("credential-compromise", CREDENTIAL_COMPROMISE)
+            Map.entry("credential-compromise", CREDENTIAL_COMPROMISE),
+            Map.entry("https://schemas.humifortis.dev/secevent/event-type/throttle", THROTTLE),
+            Map.entry("throttle", THROTTLE)
     );
 
     public String resolve(String eventUri) {
@@ -36,7 +40,8 @@ public class CaepEventRegistry {
             case ASSURANCE_LEVEL_CHANGE -> config.supportAssuranceLevelChange();
             case RISK_LEVEL_CHANGE -> config.supportAssuranceLevelChange();
             // always received; whether they CHANGE an account is gated by hf.caep.enforce.* (off by default)
-            case ACCOUNT_DISABLED, CREDENTIAL_COMPROMISE -> true;
+            // the throttle is opted into on the core side (a tenant policy) and needs the realm's brute-force detection
+            case ACCOUNT_DISABLED, CREDENTIAL_COMPROMISE, THROTTLE -> true;
             default -> false;
         };
     }

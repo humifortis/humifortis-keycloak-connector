@@ -18,6 +18,7 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
 
+import tech.humifortis.keycloak.client.EdgeRtt;
 import tech.humifortis.keycloak.client.ProxySettings;
 import tech.humifortis.keycloak.client.SaasClient;
 import tech.humifortis.keycloak.client.SaasConfig;
@@ -164,6 +165,13 @@ public class HumifortisEventListener implements EventListenerProvider {
             return;
         }
 
+        // An attempt refused by the account's temporary lockout (a Humifortis throttle or Keycloak's own): enforcement,
+        // not a wrong password. Counting it would feed the detector that created the throttle and extend it forever.
+        if (tech.humifortis.keycloak.caep.ThrottleLockout.isLockoutRefusal(event.getType(), event.getError())) {
+            logger.debugf("[HumifortisEventListener] Not reporting a lockout refusal as a failed login (user=%s)", event.getUserId());
+            return;
+        }
+
         // Path B: standard security event
         if (MONITORED_EVENTS.contains(event.getType())) {
             try {
@@ -249,6 +257,21 @@ public class HumifortisEventListener implements EventListenerProvider {
             }
         } catch (Exception e) {
             logger.debugf("[HumifortisEventListener] UA extraction failed: %s", e.getMessage());
+        }
+
+        // Round trip time: the edge's (X-Edge-RTT-Ms), else the browser's (device collector note)
+        try {
+            var as = session.getContext().getAuthenticationSession();
+            EdgeRtt.Measure rtt = EdgeRtt.resolve(session.getContext().getRequestHeaders(),
+                    as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_RTT_MS) : null);
+            if (rtt != null) {
+                event.getDetails().put(EdgeRtt.METADATA_KEY, String.valueOf(rtt.ms()));
+                event.getDetails().put(EdgeRtt.SOURCE_KEY, rtt.source());
+            }
+            Integer browser = EdgeRtt.browser(as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_RTT_MS) : null);
+            if (browser != null) event.getDetails().put(EdgeRtt.BROWSER_KEY, String.valueOf(browser));
+        } catch (Exception e) {
+            logger.debugf("[HumifortisEventListener] RTT extraction failed: %s", e.getMessage());
         }
 
         // Step 3 — Session ID

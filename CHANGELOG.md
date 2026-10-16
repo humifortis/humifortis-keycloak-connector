@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Round trip time**, forwarded as `rtt_ms` with `rtt_source`. When the reverse proxy in front of Keycloak sets
+  `X-Edge-RTT-Ms` (whole milliseconds, e.g. nginx `$tcpinfo_rtt`) the connector forwards it (`edge`; also for
+  `client_credentials`); the proxy must set the header itself (overwriting a client-sent one) and withhold it behind a CDN
+  or tunnel, like the client IP it travels with. With no such proxy the device collector times four uncached requests to
+  Keycloak and submits the shortest (`browser`, login evaluation and event stream only; the browser's own value also
+  travels as `rtt_browser_ms` when the edge's is the one in `rtt_ms`; costs the collector step about four
+  round trips). Nothing to configure; neither source, nothing sent.
+- **Throttle enforcement**: the CAEP receiver accepts the Humifortis `throttle` event and sets the user's native
+  Keycloak lockout (`failedLoginNotBefore`) until the stated deadline: monotonic (never shortened), lifted by an
+  explicit `lifted` event, reported `ignored: realm_bruteforce_disabled` when the realm has brute-force detection off.
+  A `LOGIN_ERROR` refused by the lockout (`user_temporarily_disabled`) is no longer reported as a failed login, so a
+  throttle cannot feed the detector that created it. No new setting.
 - **Admin events by and on a service account**: an Admin API call made with a service account's token is reported with
   the service account as the actor (`service_account:…`, never a `user` for its internal service-account user). An admin
   event that changes a service account (role mapping on its user, client secret regeneration, client changes) carries

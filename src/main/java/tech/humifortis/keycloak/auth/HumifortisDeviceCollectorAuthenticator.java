@@ -67,6 +67,8 @@ public class HumifortisDeviceCollectorAuthenticator implements Authenticator {
     public static final String NOTE_DEVICE_WEBGL_VENDOR   = "HUMIFORTIS_DEVICE_WEBGL_VENDOR";
     /** WebGL renderer string — "Intel Iris Xe Graphics", "Apple M2". T3: spoofable via extension. */
     public static final String NOTE_DEVICE_WEBGL_RENDERER = "HUMIFORTIS_DEVICE_WEBGL_RENDERER";
+    /** Shortest of a few timed requests to this Keycloak, in ms — the round trip when no edge measures it. */
+    public static final String NOTE_DEVICE_RTT_MS         = "HUMIFORTIS_DEVICE_RTT_MS";
     /** Time from page load to FP completion in ms — bot detection signal. */
     public static final String NOTE_DEVICE_LOAD_MS        = "HUMIFORTIS_DEVICE_LOAD_MS";
 

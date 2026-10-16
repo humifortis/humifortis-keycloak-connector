@@ -27,6 +27,7 @@ import org.keycloak.services.clientpolicy.executor.ClientPolicyExecutorProvider;
 
 import tech.humifortis.keycloak.auth.DecisionReport;
 import tech.humifortis.keycloak.auth.HumifortisRiskEvaluator;
+import tech.humifortis.keycloak.client.EdgeRtt;
 import tech.humifortis.keycloak.client.EventQueue;
 import tech.humifortis.keycloak.client.ProxySettings;
 import tech.humifortis.keycloak.client.SaasConfig;
@@ -242,6 +243,11 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
             var headers = session.getContext().getRequestHeaders();
             String ua = headers != null ? headers.getHeaderString("User-Agent") : null;
             if (ua != null && !ua.isBlank()) md.put("user_agent", ua);
+            Integer rtt = EdgeRtt.fromHeaders(headers);
+            if (rtt != null) {
+                md.put(EdgeRtt.METADATA_KEY, rtt);
+                md.put(EdgeRtt.SOURCE_KEY, EdgeRtt.EDGE);
+            }
         } catch (RuntimeException ignored) {
             // headers unavailable: not evaluated
         }

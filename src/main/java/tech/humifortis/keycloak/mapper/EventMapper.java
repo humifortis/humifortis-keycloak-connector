@@ -342,6 +342,9 @@ public class EventMapper {
 
         // Network/device context
         putIfPresent(humiEvent, details, "user_agent");
+        putIfPresent(humiEvent, details, "rtt_ms");
+        putIfPresent(humiEvent, details, "rtt_source");
+        putIfPresent(humiEvent, details, "rtt_browser_ms");
         putIfPresent(humiEvent, details, "remember_me");
 
         // Device signals — the field list lives in DeviceSignals (one source of truth). The raw

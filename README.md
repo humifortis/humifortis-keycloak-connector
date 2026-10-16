@@ -102,6 +102,25 @@ enable it. They can also be set as realm attributes (`hf.caep.enforce.accountDis
 `hf.caep.enforce.sessionRevoked` setting. A SET the connector does not act on is answered with
 `processing: ignored` and the reason, so Humifortis shows the analyst that nothing was done.
 
+#### Throttling a brute-force burst
+
+When a tenant policy asks to throttle an entity after a burst of failed logins, Humifortis pushes a signed
+`https://schemas.humifortis.dev/secevent/event-type/throttle` event. The connector carries it out with Keycloak's
+**native temporary lockout** (the user's `failedLoginNotBefore`): the next attempt is refused by Keycloak *before* the
+password is looked at, with its generic message, so a refused attempt reveals nothing about the password.
+
+- There is **no connector setting**: the tenant policy in Humifortis is the opt-in.
+- The realm needs **Brute force detection enabled** (Realm settings → Security defenses). Without it Keycloak never
+  consults `failedLoginNotBefore`, and the connector answers `ignored: realm_bruteforce_disabled`, so Humifortis shows
+  the throttle as *decided but not enforced*. To keep Keycloak's own counters from locking anyone, set a high *Failure
+  factor* and *Quick login check milliseconds* to `0`; Humifortis alone decides.
+- A deadline only moves forward: a redelivered or older event never shortens an active lockout. An administrator's
+  lift (or a risk reset) clears it.
+- An attempt refused by the lockout (`user_temporarily_disabled`) is not reported as a failed login, so it never
+  extends the throttle.
+- Service accounts (`client_credentials`) are not throttled through the user login form; the event is answered
+  `ignored: throttle_unsupported_for_entity_type`.
+
 ### Example Configuration
 
 ```bash
