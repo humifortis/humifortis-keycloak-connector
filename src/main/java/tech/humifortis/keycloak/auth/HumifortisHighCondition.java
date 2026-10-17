@@ -35,28 +35,18 @@ public class HumifortisHighCondition implements ConditionalAuthenticator {
 
     @Override
     public boolean matchCondition(AuthenticationFlowContext context) {
-        // Primary: server action (most accurate — set by HumifortisRiskAuthenticator)
-        String action = context.getAuthenticationSession()
-                               .getAuthNote(HumifortisRiskAuthenticator.NOTE_RISK_ACTION);
-
-        if (action != null && !action.isBlank()) {
-            boolean match = StepUpActions.isStepUp(action) || switch (action) {
-                case "ALLOW"                                                 -> false;
-                case "DENY", "LOCK_ACCOUNT"                                  -> false; // handled upstream
-                default                                                      -> true;  // unknown → challenge
-            };
-            logger.infof("[HumifortisHighCondition] action=%s match=%s", action, match);
-            return match;
-        }
-
-        // Fallback: risk level (backward compatibility with older flows)
-        String level = context.getAuthenticationSession()
-                              .getAuthNote(HumifortisRiskAuthenticator.NOTE_RISK_LEVEL);
-
-        boolean match = "HIGH".equals(level) || "MEDIUM".equals(level) || "CRITICAL".equals(level);
-        logger.infof("[HumifortisHighCondition] level=%s match=%s (fallback)", level, match);
+        // The platform's decision is X (step-up by default, deny when configured): the action Humifortis returned,
+        // written by HumifortisRiskAuthenticator. It never matches in dry_run / shadow under the local source, and with
+        // no notes at all it asks for a step-up: friction, never a silent allow (docs/risk-as-data.spec.md, D4, D11).
+        String configured = ContextCondition.configOf(context).get(CONFIG_OUTCOME);
+        String outcome = ContextConditions.OUTCOME_DENY.equals(configured) ? ContextConditions.OUTCOME_DENY : ContextConditions.OUTCOME_STEP_UP;
+        boolean match = ContextConditions.platformDecision(ContextCondition.notesOf(context.getAuthenticationSession()), outcome);
+        logger.infof("[HumifortisHighCondition] outcome=%s match=%s", outcome, match);
         return match;
     }
+
+    /** The configuration key naming the outcome of the platform's decision this condition tests. */
+    static final String CONFIG_OUTCOME = "outcome";
 
     @Override public void authenticate(AuthenticationFlowContext context) { context.success(); }
     @Override public void action(AuthenticationFlowContext context)       { context.success(); }

@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Local decision source** (`HUMIFORTIS_DECISION_SOURCE=local`, or *Decision source* on the risk authenticator for one
+  flow): the connector asks for the evaluation context (`/evaluate?include=context`), writes it into the authentication
+  session (allowlisted, bounded, rewritten at every evaluation) and the realm's own flow decides, with the conditions
+  *Humifortis high risk* (now with an `outcome`: `step_up` or `deny`), *risk level at least*, *rule fired* and
+  *attribute equals*. An explicit deny and a lock of the account are still enforced by the connector, whatever the flow
+  contains. A response without a usable context behaves as the `server` source (`context_missing`). The new last step
+  *Humifortis decision report* reports what the flow did (`decision_source=local`). `scripts/install_local_decision_flow.py`
+  creates the default flow. Nothing changes for realms that do not opt in.
+- The step-up router does not ask again when a second factor already completed in the session: flows that reach it
+  through several conditional sub-flows challenge the person once.
+- The step-up condition matches (asks for a challenge) when no Humifortis note is present at all, instead of letting the
+  person through: a flow that runs the condition without the risk authenticator before it is no longer an open door.
+
 - **Round trip time**, forwarded as `rtt_ms` with `rtt_source`. When the reverse proxy in front of Keycloak sets
   `X-Edge-RTT-Ms` (whole milliseconds, e.g. nginx `$tcpinfo_rtt`) the connector forwards it (`edge`; also for
   `client_credentials`); the proxy must set the header itself (overwriting a client-sent one) and withhold it behind a CDN

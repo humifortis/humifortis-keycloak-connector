@@ -90,6 +90,10 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                 context.getRealm().getName(),
                 context.getUser() != null ? context.getUser().getUsername() : "null");
 
+        // Only this authenticator writes the context notes: it clears them all before every evaluation and writes
+        // them whole, so a half-written set of an earlier pass is never read (docs/risk-as-data.spec.md, D18).
+        ContextNotes.clear(ContextCondition.notesOf(context.getAuthenticationSession()));
+
         // Step 1 — evaluate risk
         // Extract the Keycloak root auth session id (= code_id in OIDC browser flows).
         // This is used as flow_id so auth_credential_verified is grouped with the
@@ -100,9 +104,11 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         } catch (Exception e) {
             logger.debugf("[HumifortisRiskAuthenticator] Could not extract flowId: %s", e.getMessage());
         }
+        // the decision source of this flow: its own configuration, else HUMIFORTIS_DECISION_SOURCE
+        boolean local = DecisionSource.isLocalFor(ContextCondition.configOf(context));
         HumifortisRiskEvaluator evaluator = new HumifortisRiskEvaluator(context.getSession());
         HumifortisRiskEvaluator.EvaluationResult evaluation =
-                evaluator.evaluateDetailed(context.getRealm(), context.getUser(), flowId);
+                evaluator.evaluateDetailed(context.getRealm(), context.getUser(), flowId, local);
         Risk risk = evaluation.risk();
 
         // Step 2 — read explicit server decision from evaluator result
@@ -149,7 +155,20 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         // Step 4 — the mode, then the report of what the flow does with the decision (sent after enforcement
         // is decided, never before: in dry_run / shadow the person is let in and the report says so)
         String mode = serverDecision != null ? resolveMode(serverDecision) : resolveFallbackMode(context);
-        reportDecision(context, flowId, serverDecision, fallback, serverAction, mode, riskLevel, playbookRule);
+
+        // Step 4a — the local decision source: the realm's own flow decides, with the Humifortis conditions. A fallback
+        // (no answer from Humifortis) and a response without a usable context are decided as in the server source.
+        java.util.Map<String, String> sourceExtra = java.util.Map.of();
+        if (serverDecision != null && local) {
+            if (EvaluationContext.usable(serverDecision.context)) {
+                if (decideLocally(context, flowId, serverDecision, serverAction, mode, riskLevel, playbookRule, actions, risk)) return;
+            } else {
+                // a missing context never opens a door: this login behaves as the server source and says so (D11)
+                logger.warnf("[HumifortisRiskAuthenticator] context_missing: HUMIFORTIS_DECISION_SOURCE=local but the response has no usable context — the platform decision is enforced");
+                sourceExtra = java.util.Map.of("context_missing", "true");
+            }
+        }
+        reportDecision(context, flowId, serverDecision, fallback, serverAction, mode, riskLevel, playbookRule, sourceExtra);
 
         // Step 5 — enforce (or simulate in dry_run / shadow mode)
         if ("dry_run".equals(mode) || "shadow".equals(mode)) {
@@ -165,6 +184,59 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         }
 
         executeAction(context, serverAction, actions, risk, serverDecision);
+    }
+
+    // =========================================================================
+    // LOCAL DECISION SOURCE (docs/risk-as-data.spec.md, D4, D10, D17)
+    // =========================================================================
+
+    /**
+     * Writes the context into the session and lets the realm's flow decide. Returns true when the login was handled
+     * here (the flow was continued or failed), false when the caller must enforce the platform decision.
+     *
+     * <p>An explicit deny of the platform (a block, {@code decision.mandatory}) and a lock of the account are enforced
+     * here, before any condition of the flow is looked at: the flow cannot relax them. A baseline CRITICAL deny is a
+     * recommendation and is left to the flow. In {@code dry_run} and {@code shadow} nothing is enforced and the shipped
+     * conditions never match.</p>
+     */
+    private boolean decideLocally(AuthenticationFlowContext context, String flowId,
+                                  HumifortisRiskEvaluator.EvaluateResponse d, String action, String mode,
+                                  String riskLevel, String rule, List<String> actions, Risk risk) {
+        EvaluationContext c = d.context;
+        boolean enforcing = "enforce".equals(mode);
+        ContextNotes.Notes notes = ContextCondition.notesOf(context.getAuthenticationSession());
+        ContextNotes.write(notes, c, enforcing, DecisionSource.attributeAllowlist());
+
+        java.util.Map<String, String> local = new java.util.LinkedHashMap<>();
+        local.put("decision_source", "local");
+        if (notBlank(c.recordId)) local.put("record_id", c.recordId);
+
+        boolean explicitDeny = c.decision.mandatory || "LOCK_ACCOUNT".equals(action);
+        if (enforcing && explicitDeny) {
+            reportDecision(context, flowId, d, null, action, mode, riskLevel, rule, local);
+            executeAction(context, action, actions, risk, d);
+            return true;
+        }
+
+        // the flow decides: its last step reports what it did (HumifortisDecisionReport)
+        notes.set(ContextNotes.REPORT, "pending");
+        notes.set(ContextNotes.REPORT_MODE, mode);
+        notes.set(ContextNotes.REPORT_RULE, rule);
+        notes.set(ContextNotes.REPORT_SOURCE, nvl(d.policy_source, ""));
+
+        if (!enforcing) {
+            logger.infof("[HumifortisRiskAuthenticator] %s mode (local source): would=%s, nothing enforced (user=%s rule=%s)",
+                    mode, action, context.getUser() != null ? context.getUser().getUsername() : "?", rule);
+            context.getAuthenticationSession().setAuthNote("humifortis_mode", mode);
+            context.getAuthenticationSession().setAuthNote("humifortis_would_action", action);
+            if ("shadow".equals(mode)) executeSideActions(context, "ALLOW", actions, d);
+            context.success();
+            return true;
+        }
+        // side effects of the playbook (notify, revoke other sessions after login) run as for an allow: the flow may still deny
+        executeSideActions(context, "ALLOW", actions, d);
+        context.success();
+        return true;
     }
 
     // =========================================================================
@@ -530,7 +602,8 @@ public class HumifortisRiskAuthenticator implements Authenticator {
      */
     private void reportDecision(AuthenticationFlowContext context, String flowId,
                                 HumifortisRiskEvaluator.EvaluateResponse d, Fallback fallback,
-                                String action, String mode, String riskLevel, String decisionRule) {
+                                String action, String mode, String riskLevel, String decisionRule,
+                                java.util.Map<String, String> more) {
         try {
             SaasConfig config = SaasConfig.fromEnv();
             UserModel user = context.getUser();
@@ -562,6 +635,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                 type = DecisionReport.FALLBACK_APPLIED;
                 if (fallback != null) extra.putAll(fallback.report());
             }
+            if (more != null) extra.putAll(more);
             EventQueue.shared(config).submit(DecisionReport.build(type, HumifortisRiskEvaluator.buildEntityId(realm, user), DecisionReport.USER,
                     flowId, realm.getName(), action, enforced, mode, extra));
         } catch (RuntimeException e) {

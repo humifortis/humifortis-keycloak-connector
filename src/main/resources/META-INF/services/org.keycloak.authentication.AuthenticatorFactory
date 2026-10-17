@@ -2,3 +2,7 @@ tech.humifortis.keycloak.auth.HumifortisDeviceCollectorFactory
 tech.humifortis.keycloak.auth.HumifortisRiskAuthenticatorFactory
 tech.humifortis.keycloak.auth.HumifortisHighConditionFactory
 tech.humifortis.keycloak.auth.HumifortisStepUpRouterFactory
+tech.humifortis.keycloak.auth.ContextConditionFactory$RiskLevel
+tech.humifortis.keycloak.auth.ContextConditionFactory$RuleFired
+tech.humifortis.keycloak.auth.ContextConditionFactory$Attribute
+tech.humifortis.keycloak.auth.HumifortisDecisionReportFactory

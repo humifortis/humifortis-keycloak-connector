@@ -234,6 +234,58 @@ The script never blocks a login: if it has not finished when the user submits, i
 1.5 s, then submits anyway. The signals are bound to the login session (anti-replay) and
 checked by the connector.
 
+## Let your own flow decide (optional): the local decision source
+
+By default Humifortis decides and the connector applies the decision (`server`). With the **local** source your Keycloak
+flow decides, using what Humifortis found: the connector asks for the *evaluation context* of each login (risk level, the
+rules that fired, a few attributes, the reasons), writes it into the authentication session, and the flow reacts with
+Humifortis conditions. Humifortis keeps measuring: it reports what your flow did, so the console can show where your
+policy and the platform's agree.
+
+**What stays with Humifortis.** An *explicit deny* (a block rule of the platform or of your own tenant rules, and a
+lock of the account) is enforced by the connector before any condition of your flow is looked at: a flow cannot relax it.
+The *baseline* deny for the CRITICAL level is a recommendation your flow decides on. To keep it, add the deny step
+(the default flow does), or add the tenant rule *Block critical logins* in Humifortis, which makes it explicit.
+In `dry_run` and `shadow` nothing is enforced and the conditions never match, with either source.
+
+**Turn it on** (one of the two):
+
+- for a whole Keycloak: `HUMIFORTIS_DECISION_SOURCE=local`;
+- for one flow: *Humifortis Risk Authenticator* > Config > *Decision source* = `local` (wins over the variable, so a realm moves one flow at a time).
+
+**The default flow** (it behaves like the `server` source: it honours the platform's step-up and deny) is created by
+`scripts/install_local_decision_flow.py` (Python 3.8+, standard library only; add `--bind` to make it the browser flow):
+
+```bash
+KC_URL=https://sso.example.com KC_REALM=myrealm KC_ADMIN_USER=admin KC_ADMIN_PASSWORD=... \
+  python3 scripts/install_local_decision_flow.py --bind
+```
+
+Customise it with Keycloak's flow structure and these conditions (all placed after *Humifortis Risk Authenticator*):
+
+| Condition | Matches when |
+|---|---|
+| Humifortis high risk (`outcome = step_up` or `deny`) | the platform's decision is a step-up, or a (baseline) deny |
+| Humifortis risk level at least | the risk level is at least the one you choose |
+| Humifortis rule fired | the named Humifortis rule fired for this login |
+| Humifortis attribute equals | an allowlisted attribute equals the value (booleans without case) |
+
+There is no `contains`, no prefix match and no expression: anything richer is written once as a rule in Humifortis, and
+the flow tests *rule fired*. Two conditional sub-flows that both match challenge the person once.
+
+Keep **Humifortis decision report** as the last step of the flow: it reports what the flow did. Without it Humifortis
+sees the decisions but not what the flow did with them. In the deny sub-flow, put a second one (*Report as* = `deny`)
+just before **Deny access**, which ends the flow and so cannot be followed by a report.
+
+Attributes offered to the conditions are those of `HUMIFORTIS_CONTEXT_ATTRIBUTES` (comma-separated; default
+`network.is_anonymous, network.is_tor, network.is_vpn, network.is_datacenter, network.country_mismatch,
+network.implied_speed_kmh, device.first_seen`). Never add an address, an e-mail or a user agent: the session notes are
+kept by the Keycloak server and every other provider of the realm can read them.
+
+**If the context is missing** (an older Humifortis, an unknown context version) the login behaves as `server`: the
+platform's decision is enforced, and the connector logs `context_missing`. If your flow runs a Humifortis step-up
+condition without the risk authenticator before it, the person is challenged, never let through.
+
 ## Step 7: Test the Installation
 
 ### Test Event Listener

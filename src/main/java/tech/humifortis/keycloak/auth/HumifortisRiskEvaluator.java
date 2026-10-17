@@ -104,6 +104,11 @@ public class HumifortisRiskEvaluator {
      * why ({@link EvaluationResult#fallbackReason()}): the authenticator applies the fallback policy.
      */
     EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId) {
+        return evaluateDetailed(realm, knownUser, flowId, DecisionSource.isLocal());
+    }
+
+    /** As above; {@code local} asks the server for the evaluation context (HUMIFORTIS_DECISION_SOURCE=local). */
+    EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId, boolean local) {
         if (knownUser == null) {
             logger.warnf("[HumifortisRiskEvaluator] User is null — fallback");
             return EvaluationResult.fallback("null_user");
@@ -145,7 +150,7 @@ public class HumifortisRiskEvaluator {
         }
 
         HumifortisTransport.Result result = transport.send(
-                HumifortisTransport.jsonPost(config, "/evaluate", tenantId, body),
+                HumifortisTransport.jsonPost(config, DecisionSource.evaluatePath(local), tenantId, body),
                 RetryPolicy.evaluate(config), callId);
         if (!result.ok()) {
             String reason = result.failure().reason();
@@ -669,6 +674,10 @@ public class HumifortisRiskEvaluator {
         @SerializedName("verification_challenge_id")    public String verification_challenge_id;
         /** Minimum AAL required to satisfy the challenge (AAL2 default, AAL3 for WebAuthn). */
         @SerializedName("verification_required_level")  public String verification_required_level;
+        /** The evaluation context, present when the request asked for it (HUMIFORTIS_DECISION_SOURCE=local) and the server knows it. */
+        public EvaluationContext context;
+        /** True when this is the original answer of an earlier request with the same event id, not a new decision. */
+        public boolean replayed;
     }
 
     /**

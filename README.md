@@ -83,6 +83,8 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
 |----------|----------|---------|-------------|
 | `HUMIFORTIS_API_URL` | No | `https://api.humifortis.educosmic.tech` | Humifortis SaaS API endpoint |
 | `HUMIFORTIS_API_KEY` | **Yes** | - | API key from SaaS connector registration |
+| `HUMIFORTIS_DECISION_SOURCE` | No | `server` | `server`: the action returned by Humifortis is enforced. `local`: your flow decides with the Humifortis conditions (an explicit deny is still enforced). Can also be set per flow on the risk authenticator. See INSTALLATION.md, "Let your own flow decide" |
+| `HUMIFORTIS_CONTEXT_ATTRIBUTES` | No | (non-sensitive network and device attributes) | Attributes written to the session for the conditions of the `local` source |
 | `HUMIFORTIS_TIMEOUT_MS` | No | `800` | Timeout of one API attempt (ms) |
 | `HUMIFORTIS_EVALUATE_BUDGET_MS` | No | `1500` | Longest a login waits for a decision, retries included (ms) |
 | `HUMIFORTIS_FALLBACK` | No | (tenant policy) | `allow` \| `step_up` \| `deny` when Humifortis cannot answer — overrides the tenant policy (see INSTALLATION.md, Resilience) |

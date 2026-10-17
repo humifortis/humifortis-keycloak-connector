@@ -7,8 +7,8 @@ import org.keycloak.models.AuthenticationExecutionModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.provider.ProviderConfigProperty;
+import org.keycloak.provider.ProviderConfigurationBuilder;
 
-import java.util.Collections;
 import java.util.List;
 
 /**
@@ -33,7 +33,7 @@ public class HumifortisHighConditionFactory implements ConditionalAuthenticatorF
     @Override public String getId()          { return PROVIDER_ID; }
     @Override public String getDisplayType() { return "Condition - Humifortis high risk"; }
     @Override public String getReferenceCategory()  { return null; }
-    @Override public boolean isConfigurable()       { return false; }
+    @Override public boolean isConfigurable()       { return true; }
     @Override public boolean isUserSetupAllowed()   { return false; }
 
     @Override
@@ -41,11 +41,16 @@ public class HumifortisHighConditionFactory implements ConditionalAuthenticatorF
 
     @Override
     public String getHelpText() {
-        return "Triggers the MFA sub-flow when Humifortis risk action is REQUIRE_MFA/REQUIRE_WEBAUTHN " +
-               "or risk level is MEDIUM/HIGH/CRITICAL. Place after Humifortis Risk Authenticator.";
+        return "Matches when the decision of Humifortis for this login is a step-up (or a deny, when configured). " +
+               "Place after Humifortis Risk Authenticator.";
     }
 
-    @Override public List<ProviderConfigProperty> getConfigProperties() { return Collections.emptyList(); }
+    @Override public List<ProviderConfigProperty> getConfigProperties() {
+        return ProviderConfigurationBuilder.create().property()
+                .name(HumifortisHighCondition.CONFIG_OUTCOME).label("Platform decision").type(ProviderConfigProperty.LIST_TYPE)
+                .options(ContextConditions.OUTCOME_STEP_UP, ContextConditions.OUTCOME_DENY).defaultValue(ContextConditions.OUTCOME_STEP_UP)
+                .helpText("The decision of Humifortis that matches: a step-up, or a deny.").add().build();
+    }
     @Override public Authenticator create(KeycloakSession session)      { return SINGLETON; }
     @Override public HumifortisHighCondition getSingleton()             { return SINGLETON; }
     @Override public void init(Config.Scope config)                     {}

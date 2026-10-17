@@ -87,6 +87,15 @@ public class HumifortisStepUpRouter implements Authenticator {
     @Override
     public void authenticate(AuthenticationFlowContext context) {
         try {
+            // A second factor that already completed in this authentication session is not asked for again: flows that
+            // reach this step through several conditional sub-flows (an OR of conditions) challenge the person once
+            // (docs/risk-as-data.spec.md, WP 3).
+            if (HumifortisDecisionReport.secondFactorCompleted(context.getAuthenticationSession(), context.getRealm())) {
+                logger.infof("[StepUpRouter] second factor already completed in this session -> not asked again user=%s",
+                             context.getUser() != null ? context.getUser().getUsername() : "?");
+                context.success();
+                return;
+            }
             AuthenticatorConfigModel cfg = context.getAuthenticatorConfig();
             String fallbackOrder = getConfig(cfg, "fallback.order", "EMAIL_OTP,TOTP,WEBAUTHN");
             String defaultMethod = getConfig(cfg, "default.method",  "EMAIL_OTP");
