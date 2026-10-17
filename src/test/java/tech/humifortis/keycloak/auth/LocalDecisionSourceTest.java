@@ -86,7 +86,7 @@ class LocalDecisionSourceTest {
     @Test
     void everyEvaluationClearsTheNotesAndWritesThemWhole() {
         MapNotes n = written(true);
-        n.set(ContextNotes.REPORT, "pending");
+        n.set(ContextNotes.REPORT, ContextNotes.REPORT_PENDING);
         ContextNotes.clear(n);
         assertTrue(n.m.keySet().stream().noneMatch(k -> k.startsWith("HUMIFORTIS_CTX") || k.equals(ContextNotes.REASONS)),
                 "nothing of the earlier pass is left: " + n.m.keySet());

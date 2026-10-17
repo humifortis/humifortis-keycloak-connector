@@ -57,7 +57,7 @@ public final class HumifortisDecisionReport implements Authenticator {
     private void report(AuthenticationFlowContext context) {
         AuthenticationSessionModel session = context.getAuthenticationSession();
         ContextNotes.Notes notes = ContextCondition.notesOf(session);
-        if (!"pending".equals(notes.get(ContextNotes.REPORT))) return;
+        if (!ContextNotes.REPORT_PENDING.equals(notes.get(ContextNotes.REPORT))) return;
         notes.remove(ContextNotes.REPORT);   // one report per decision, even if the flow is run again
 
         SaasConfig config = SaasConfig.fromEnv();

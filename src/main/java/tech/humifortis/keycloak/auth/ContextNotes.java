@@ -27,10 +27,10 @@ final class ContextNotes {
     static final String ATTR_PREFIX  = "HUMIFORTIS_CTX_ATTR_";
     static final String ATTR_KEYS    = "HUMIFORTIS_CTX_ATTR_KEYS";
     static final String WOULD_ACTION = "HUMIFORTIS_WOULD_ACTION";
-    /** Set while the report of this login is still to be made by the last-step reporter. */
+    /** The note that says the report of this login is still to be made by the last-step reporter, and its value while it is. */
     static final String REPORT       = "HUMIFORTIS_CTX_REPORT";
+    static final String REPORT_PENDING = "pending";
     /** What the reporter needs to report the decision of this login. */
-    static final String REPORT_ENFORCED = "HUMIFORTIS_CTX_REPORT_ENFORCED";
     static final String REPORT_MODE     = "HUMIFORTIS_CTX_REPORT_MODE";
     static final String REPORT_RULE     = "HUMIFORTIS_CTX_REPORT_RULE";
     static final String REPORT_SOURCE   = "HUMIFORTIS_CTX_REPORT_POLICY_SOURCE";
@@ -42,7 +42,7 @@ final class ContextNotes {
 
     private static final Gson GSON = new Gson();
     private static final List<String> FIXED = List.of(VERSION, ENFORCING, LEVEL, SCORE, RULES, REASONS, RECORD, ATTR_KEYS,
-            WOULD_ACTION, REPORT, REPORT_ENFORCED, REPORT_MODE, REPORT_RULE, REPORT_SOURCE);
+            WOULD_ACTION, REPORT, REPORT_MODE, REPORT_RULE, REPORT_SOURCE);
 
     /** The notes of one authentication session: the Keycloak session in production, a map in tests. */
     interface Notes {

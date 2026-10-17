@@ -203,7 +203,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                                   HumifortisRiskEvaluator.EvaluateResponse d, String action, String mode,
                                   String riskLevel, String rule, List<String> actions, Risk risk) {
         EvaluationContext c = d.context;
-        boolean enforcing = "enforce".equals(mode);
+        boolean enforcing = DecisionReport.applied(mode);
         ContextNotes.Notes notes = ContextCondition.notesOf(context.getAuthenticationSession());
         ContextNotes.write(notes, c, enforcing, DecisionSource.attributeAllowlist());
 
@@ -219,7 +219,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         }
 
         // the flow decides: its last step reports what it did (HumifortisDecisionReport)
-        notes.set(ContextNotes.REPORT, "pending");
+        notes.set(ContextNotes.REPORT, ContextNotes.REPORT_PENDING);
         notes.set(ContextNotes.REPORT_MODE, mode);
         notes.set(ContextNotes.REPORT_RULE, rule);
         notes.set(ContextNotes.REPORT_SOURCE, nvl(d.policy_source, ""));
