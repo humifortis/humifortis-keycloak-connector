@@ -22,16 +22,22 @@ import java.util.*;
  * ─────────────────────────────────────────────────────────────────
  * REQUIRE_EMAIL_OTP  → EMAIL_OTP (forced, no override)
  * REQUIRE_WEBAUTHN   → WEBAUTHN if enrolled, else EMAIL_OTP (degraded)
- * REQUIRE_TOTP       → TOTP if enrolled, else EMAIL_OTP (allow.enrollment=true triggers wizard)
+ * REQUIRE_TOTP       → TOTP if enrolled, else EMAIL_OTP (allow.enrollment=true adds the enrolment for after this login)
+ *
+ * TOTP and WebAuthn run Keycloak's own authenticators inside this step: no extra execution in the realm flow.
  * REQUIRE_MFA        → first method in fallback.order that is available
+ *
+ * SMS_OTP is a text message with the same code as the email code (lifetime, attempts, replay, rate limit). It is
+ * available to a person who has a phone number (user attribute phoneNumber) when HUMIFORTIS_SMS_GATEWAY_URL is
+ * configured, and is where an email code cannot go (no verified email) or fails.
  * null / blank       → defaultMethod (default: EMAIL_OTP) — fail-secure
  * unknown string     → defaultMethod — fail-secure + warn log
  * ALLOW/DENY/LOCK    → ERROR log + defaultMethod (mis-routing guard)
  * ─────────────────────────────────────────────────────────────────
  *
  * Configurator properties (Keycloak admin UI):
- *   fallback.order    – comma-separated: EMAIL_OTP,TOTP,WEBAUTHN
- *   default.method    – EMAIL_OTP | TOTP | WEBAUTHN
+ *   fallback.order    – comma-separated: EMAIL_OTP,TOTP,WEBAUTHN,SMS_OTP
+ *   default.method    – EMAIL_OTP | TOTP | WEBAUTHN | SMS_OTP
  *   email_otp.expiry  – seconds (default 180; clamped 60 for CRITICAL, 120 for HIGH)
  *   allow.enrollment  – boolean (default false; SECURITY: keep false in production)
  */
@@ -41,6 +47,10 @@ public class HumifortisStepUpRouter implements Authenticator {
 
     // ── Auth session note keys ────────────────────────────────────────────────
     public static final String NOTE_MFA_METHOD             = "HUMIFORTIS_MFA_METHOD";
+    /** The kind of the WebAuthn credential the person presented (security_key | device_bound | synced | unknown). */
+    public static final String NOTE_MFA_KIND               = "HUMIFORTIS_MFA_KIND";
+    /** The reference of that credential (a hash of its Keycloak id, see WebAuthnKinds). */
+    public static final String NOTE_MFA_CREDENTIAL         = "HUMIFORTIS_MFA_CREDENTIAL";
     static final String NOTE_EMAIL_OTP_HASH                = "HUMIFORTIS_EMAIL_OTP_HASH";
     static final String NOTE_EMAIL_OTP_EXPIRY              = "HUMIFORTIS_EMAIL_OTP_EXPIRY";
     static final String NOTE_EMAIL_OTP_ATTEMPTS            = "HUMIFORTIS_EMAIL_OTP_ATTEMPTS";
@@ -59,7 +69,7 @@ public class HumifortisStepUpRouter implements Authenticator {
 
     // ── MFA method enum ───────────────────────────────────────────────────────
     enum MfaMethod {
-        TOTP, EMAIL_OTP, WEBAUTHN;
+        TOTP, EMAIL_OTP, WEBAUTHN, SMS_OTP;
 
         static MfaMethod fromString(String s) {
             if (s == null) return EMAIL_OTP;
@@ -97,7 +107,7 @@ public class HumifortisStepUpRouter implements Authenticator {
                 return;
             }
             AuthenticatorConfigModel cfg = context.getAuthenticatorConfig();
-            String fallbackOrder = getConfig(cfg, "fallback.order", "EMAIL_OTP,TOTP,WEBAUTHN");
+            String fallbackOrder = getConfig(cfg, "fallback.order", "EMAIL_OTP,TOTP,WEBAUTHN,SMS_OTP");
             String defaultMethod = getConfig(cfg, "default.method",  "EMAIL_OTP");
 
             String enforcedAction = context.getAuthenticationSession()
@@ -125,8 +135,13 @@ public class HumifortisStepUpRouter implements Authenticator {
                 return;
             }
 
-            MfaMethod method = resolveMethodSafely(enforcedAction, context.getUser(),
-                                                    fallbackOrder, defaultMethod, cfg);
+            MfaMethod method = requiredMethod(context.getAuthenticationSession()
+                                                      .getAuthNote(HumifortisRiskAuthenticator.NOTE_REQUIRED_FACTOR));
+            if (method == null) {
+                // Humifortis gave no factor (it could not be reached: the connector decided the step-up itself): the
+                // router picks by its own order
+                method = resolveMethodSafely(enforcedAction, context.getUser(), fallbackOrder, defaultMethod, cfg);
+            }
 
             logger.infof("[StepUpRouter] action=%s -> method=%s user=%s",
                          enforcedAction, method, context.getUser().getUsername());
@@ -139,29 +154,39 @@ public class HumifortisStepUpRouter implements Authenticator {
                     "initiated", "", correlationId, "action=" + enforcedAction);
 
             switch (method) {
-                case TOTP     -> challengeTotp(context);
+                case TOTP     -> challengeTotp(context, cfg, correlationId);
                 case WEBAUTHN -> challengeWebAuthn(context, cfg, correlationId);
                 case EMAIL_OTP -> {
                     if (!canSendEmail(context.getUser())) {
-                        denyWithCode(context, HumifortisError.MFA_EMAIL_UNVERIFIED,
-                                "user=" + context.getUser().getUsername());
+                        // no verified email to write to: the text is the factor she can receive, if she has one
+                        if (canText(context.getUser())) {
+                            degradeToSms(context, cfg, correlationId, "email_unverified");
+                        } else {
+                            denyWithCode(context, HumifortisError.MFA_EMAIL_UNVERIFIED,
+                                    "user=" + context.getUser().getUsername());
+                        }
                         return;
                     }
                     try {
-                        challengeEmailOtp(context, cfg);
+                        challengeCodeOtp(context, cfg, MfaMethod.EMAIL_OTP);
                     } catch (HumifortisEmailException e) {
-                        if (isEnrolled(context.getUser(), MfaMethod.TOTP)) {
-                            logger.warnf("[StepUpRouter] SMTP failed -> fallback TOTP user=%s [%s]",
-                                         context.getUser().getUsername(), e.error.code);
-                            HumifortisAuditLog.log("smtp_fallback_totp", userId,
-                                    "EMAIL_OTP->TOTP", "degraded",
-                                    e.error.code, correlationId, e.technicalDetail);
-                            context.getAuthenticationSession()
-                                   .setAuthNote(NOTE_MFA_METHOD, MfaMethod.TOTP.name());
-                            challengeTotp(context);
+                        afterDeliveryFailure(context, cfg, correlationId, MfaMethod.EMAIL_OTP, e);
+                    }
+                }
+                case SMS_OTP -> {
+                    if (!canText(context.getUser())) {
+                        // no number or no gateway: the email code if it can be delivered
+                        if (canSendEmail(context.getUser())) {
+                            degradeToEmailOtp(context, cfg, "sms unavailable");
                         } else {
-                            denyWithCode(context, e.error, e.technicalDetail);
+                            denyWithCode(context, HumifortisError.MFA_NO_METHOD, "user=" + context.getUser().getUsername());
                         }
+                        return;
+                    }
+                    try {
+                        challengeCodeOtp(context, cfg, MfaMethod.SMS_OTP);
+                    } catch (HumifortisEmailException e) {
+                        afterDeliveryFailure(context, cfg, correlationId, MfaMethod.SMS_OTP, e);
                     }
                 }
             }
@@ -183,9 +208,13 @@ public class HumifortisStepUpRouter implements Authenticator {
             MfaMethod method = MfaMethod.fromString(
                     context.getAuthenticationSession().getAuthNote(NOTE_MFA_METHOD));
             switch (method) {
-                case TOTP      -> context.attempted(); // delegated to auth-otp-form ALTERNATIVE
-                case WEBAUTHN  -> webAuthn(context).action(context); // Keycloak validates the assertion
-                case EMAIL_OTP -> validateEmailOtp(context);
+                case TOTP      -> otp(context).action(context);      // Keycloak validates the code
+                case WEBAUTHN  -> {
+                    // the kind of the credential presented, then Keycloak validates the assertion
+                    if (refusedKind(context)) return;
+                    webAuthn(context).action(context);
+                }
+                case EMAIL_OTP, SMS_OTP -> validateCodeOtp(context);
             }
         } catch (Exception e) {
             logger.errorf("[StepUpRouter] Validation error: %s", e.getMessage());
@@ -197,6 +226,16 @@ public class HumifortisStepUpRouter implements Authenticator {
     // =========================================================================
     // METHOD RESOLUTION
     // =========================================================================
+
+    /** The factor Humifortis decided, or null when it named none (or one this connector cannot challenge). */
+    static MfaMethod requiredMethod(String factor) {
+        if (factor == null || factor.isBlank()) return null;
+        try {
+            return MfaMethod.valueOf(factor.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
 
     MfaMethod resolveMethodSafely(String action, UserModel user, String fallbackOrder,
                                    String defaultMethod, AuthenticatorConfigModel cfg) {
@@ -236,7 +275,13 @@ public class HumifortisStepUpRouter implements Authenticator {
                 yield MfaMethod.EMAIL_OTP;
             }
 
-            case "REQUIRE_MFA" -> firstAvailable(user, parseFallbackOrder(fallbackOrder));
+            // Humifortis named no factor (it could not be reached): the person's own factor first, the one the realm already
+            // gave her, then the router's order
+            case "REQUIRE_MFA" -> {
+                if (isEnrolled(user, MfaMethod.WEBAUTHN)) yield MfaMethod.WEBAUTHN;
+                if (isEnrolled(user, MfaMethod.TOTP)) yield MfaMethod.TOTP;
+                yield firstAvailable(user, parseFallbackOrder(fallbackOrder));
+            }
 
             case "ALLOW", "DENY", "LOCK_ACCOUNT" -> {
                 logger.errorf("[StepUpRouter] Unexpected action '%s' in MFA sub-flow -> %s",
@@ -269,11 +314,17 @@ public class HumifortisStepUpRouter implements Authenticator {
                                      .anyMatch(c -> "webauthn".equals(c.getType())
                                                  || "webauthn-passwordless".equals(c.getType()));
                 case EMAIL_OTP -> canSendEmail(user);
+                case SMS_OTP -> canText(user);
             };
         } catch (Exception e) {
             logger.warnf("[StepUpRouter] Enrollment check for %s failed: %s", method, e.getMessage());
             return false;
         }
+    }
+
+    /** Whether this person can receive a text (a gateway is configured and she has a number); overridden in tests. */
+    boolean canText(UserModel user) {
+        return SmsGateway.canText(user);
     }
 
     boolean canSendEmail(UserModel user) {
@@ -283,15 +334,29 @@ public class HumifortisStepUpRouter implements Authenticator {
     }
 
     // =========================================================================
-    // TOTP — delegates to native auth-otp-form ALTERNATIVE in realm flow
+    // TOTP — Keycloak's own OTP form (authenticator app); a user without one
+    // degrades to EMAIL_OTP
     // =========================================================================
 
-    private void challengeTotp(AuthenticationFlowContext context) {
-        logger.infof("[StepUpRouter] TOTP delegated to auth-otp-form user=%s",
+    /** Keycloak's OTP form authenticator, run inside this step (no realm-flow change needed). */
+    org.keycloak.authentication.Authenticator otp(AuthenticationFlowContext context) {
+        return new org.keycloak.authentication.authenticators.browser.OTPFormAuthenticator();
+    }
+
+    private void challengeTotp(AuthenticationFlowContext context,
+                               AuthenticatorConfigModel cfg, String correlationId) {
+        if (isEnrolled(context.getUser(), MfaMethod.TOTP)) {
+            logger.infof("[StepUpRouter] TOTP challenge user=%s", context.getUser().getUsername());
+            HumifortisAuditLog.log("totp_challenge", context.getUser().getId(),
+                    "TOTP", "initiated", "", correlationId, "");
+            otp(context).authenticate(context);
+            return;
+        }
+        logger.warnf("[StepUpRouter] TOTP: not enrolled -> degraded EMAIL_OTP user=%s",
                      context.getUser().getUsername());
-        HumifortisAuditLog.log("totp_delegated", context.getUser().getId(),
-                "TOTP", "delegated_to_native", "", "", "");
-        context.attempted();
+        HumifortisAuditLog.log("totp_degraded", context.getUser().getId(),
+                "TOTP->EMAIL_OTP", "degraded", "", correlationId, "not_enrolled");
+        degradeToEmailOtp(context, cfg, "totp fallback: email not verified");
     }
 
     // =========================================================================
@@ -302,6 +367,54 @@ public class HumifortisStepUpRouter implements Authenticator {
     /** Keycloak's WebAuthn authenticator, run inside this step (no realm-flow change needed). */
     org.keycloak.authentication.Authenticator webAuthn(AuthenticationFlowContext context) {
         return new org.keycloak.authentication.authenticators.browser.WebAuthnAuthenticator(context.getSession());
+    }
+
+    /**
+     * Reads the kind of the WebAuthn credential presented (its stored transports and the backup-eligible flag of the posted
+     * authenticator data) and keeps it, with the credential's reference, for the step-up events. When the decision accepts
+     * only a stronger kind (the tenant's phishing_resistant setting), the credential is refused as a failed step-up and the
+     * ceremony is asked again. The flags are read before Keycloak verifies the signature: they are only ever used to
+     * refuse, never to accept, and a forged flag fails Keycloak's verification.
+     */
+    boolean refusedKind(AuthenticationFlowContext context) {
+        String kind = tech.humifortis.keycloak.user.WebAuthnKinds.UNKNOWN;
+        try {
+            var form = context.getHttpRequest().getDecodedFormParameters();
+            var stored = tech.humifortis.keycloak.user.WebAuthnKinds.find(
+                    tech.humifortis.keycloak.user.WebAuthnKinds.stored(context.getUser()), form.getFirst("credentialId"));
+            Boolean backup = tech.humifortis.keycloak.user.WebAuthnKinds.backupEligible(
+                    tech.humifortis.keycloak.user.WebAuthnKinds.decode(form.getFirst("authenticatorData")));
+            kind = tech.humifortis.keycloak.user.WebAuthnKinds.kind(stored != null ? stored.transports() : List.of(), backup);
+            if (stored != null && stored.ref() != null) {
+                context.getAuthenticationSession().setAuthNote(NOTE_MFA_CREDENTIAL, stored.ref());
+            } else {
+                context.getAuthenticationSession().removeAuthNote(NOTE_MFA_CREDENTIAL);
+            }
+            context.getAuthenticationSession().setAuthNote(NOTE_MFA_KIND, kind);
+        } catch (RuntimeException e) {
+            logger.debugf("[StepUpRouter] WebAuthn kind unreadable: %s", e.getMessage());
+        }
+        String required = context.getAuthenticationSession().getAuthNote(HumifortisRiskAuthenticator.NOTE_REQUIRED_FACTOR_KIND);
+        if (required == null || required.isBlank()
+                || tech.humifortis.keycloak.user.WebAuthnKinds.rank(kind) >= tech.humifortis.keycloak.user.WebAuthnKinds.rank(required)) {
+            return false;
+        }
+        logger.infof("[StepUpRouter] WebAuthn credential of kind %s refused (the decision accepts %s or stronger) user=%s",
+                kind, required, context.getUser().getUsername());
+        try {
+            org.keycloak.events.EventBuilder evt = context.getEvent().clone();
+            evt.event(org.keycloak.events.EventType.LOGIN_ERROR);
+            evt.user(context.getUser());
+            evt.detail("method", "WEBAUTHN");
+            evt.detail("hf_reason", "webauthn_kind_not_accepted");
+            // error() SENDS the event: everything it carries is set before
+            evt.error(org.keycloak.events.Errors.INVALID_USER_CREDENTIALS);
+        } catch (Exception ignored) {}
+        HumifortisAuditLog.log("mfa_failure", context.getUser().getId(), "WEBAUTHN", "kind_not_accepted", "", "",
+                "kind=" + kind + " required=" + required);
+        context.form().setError("This passkey cannot be used here. Use a security key or a passkey kept on this device.");
+        webAuthn(context).authenticate(context);
+        return true;
     }
 
     private void challengeWebAuthn(AuthenticationFlowContext context,
@@ -318,21 +431,69 @@ public class HumifortisStepUpRouter implements Authenticator {
                      context.getUser().getUsername());
         HumifortisAuditLog.log("webauthn_degraded", context.getUser().getId(),
                 "WEBAUTHN->EMAIL_OTP", "degraded", "", correlationId, "not_enrolled");
+        degradeToEmailOtp(context, cfg, "webauthn fallback: email not verified");
+    }
+
+    /** A factor the user does not have: the step-up is an email code (the method note follows, so it is reported). */
+    private void degradeToEmailOtp(AuthenticationFlowContext context, AuthenticatorConfigModel cfg, String unverifiedDetail) {
+        String correlationId = context.getAuthenticationSession().getAuthNote("HUMIFORTIS_CORRELATION_ID");
         context.getAuthenticationSession().setAuthNote(NOTE_MFA_METHOD, MfaMethod.EMAIL_OTP.name());
         if (!canSendEmail(context.getUser())) {
-            denyWithCode(context, HumifortisError.MFA_EMAIL_UNVERIFIED,
-                         "webauthn fallback: email not verified");
+            if (canText(context.getUser())) {
+                degradeToSms(context, cfg, correlationId, "email_unverified");
+            } else {
+                denyWithCode(context, HumifortisError.MFA_EMAIL_UNVERIFIED, unverifiedDetail);
+            }
             return;
         }
-        try { challengeEmailOtp(context, cfg); }
+        try { challengeCodeOtp(context, cfg, MfaMethod.EMAIL_OTP); }
+        catch (HumifortisEmailException e) { afterDeliveryFailure(context, cfg, correlationId, MfaMethod.EMAIL_OTP, e); }
+    }
+
+    /** The step-up goes by text message instead (the method note follows, so it is reported as SMS_OTP). */
+    private void degradeToSms(AuthenticationFlowContext context, AuthenticatorConfigModel cfg, String correlationId, String reason) {
+        String userId = context.getUser().getId();
+        HumifortisAuditLog.log("sms_fallback", userId, "->SMS_OTP", "degraded", "", correlationId, reason);
+        context.getAuthenticationSession().setAuthNote(NOTE_MFA_METHOD, MfaMethod.SMS_OTP.name());
+        try { challengeCodeOtp(context, cfg, MfaMethod.SMS_OTP); }
         catch (HumifortisEmailException e) { denyWithCode(context, e.error, e.technicalDetail); }
     }
 
+    /**
+     * A code could not be delivered on its channel. The person's authenticator app if she has one, else the other
+     * channel if she can receive it, else the step-up is refused (never a silent allow).
+     */
+    private void afterDeliveryFailure(AuthenticationFlowContext context, AuthenticatorConfigModel cfg, String correlationId,
+                                      MfaMethod failed, HumifortisEmailException e) {
+        UserModel user = context.getUser();
+        String userId = user.getId();
+        if (isEnrolled(user, MfaMethod.TOTP)) {
+            logger.warnf("[StepUpRouter] %s delivery failed -> fallback TOTP user=%s [%s]", failed, user.getUsername(), e.error.code);
+            HumifortisAuditLog.log("delivery_fallback_totp", userId, failed + "->TOTP", "degraded", e.error.code, correlationId, e.technicalDetail);
+            context.getAuthenticationSession().setAuthNote(NOTE_MFA_METHOD, MfaMethod.TOTP.name());
+            challengeTotp(context, cfg, correlationId);
+            return;
+        }
+        MfaMethod other = failed == MfaMethod.EMAIL_OTP ? MfaMethod.SMS_OTP : MfaMethod.EMAIL_OTP;
+        if (isEnrolled(user, other)) {
+            logger.warnf("[StepUpRouter] %s delivery failed -> fallback %s user=%s [%s]", failed, other, user.getUsername(), e.error.code);
+            HumifortisAuditLog.log("delivery_fallback_" + other.name().toLowerCase(Locale.ROOT), userId, failed + "->" + other,
+                    "degraded", e.error.code, correlationId, e.technicalDetail);
+            context.getAuthenticationSession().setAuthNote(NOTE_MFA_METHOD, other.name());
+            try { challengeCodeOtp(context, cfg, other); }
+            catch (HumifortisEmailException again) { denyWithCode(context, again.error, again.technicalDetail); }
+            return;
+        }
+        denyWithCode(context, e.error, e.technicalDetail);
+    }
+
     // =========================================================================
-    // EMAIL OTP — challenge
+    // EMAIL / SMS OTP — challenge: one code, two channels
     // =========================================================================
 
-    void challengeEmailOtp(AuthenticationFlowContext context, AuthenticatorConfigModel cfg) {
+    void challengeCodeOtp(AuthenticationFlowContext context, AuthenticatorConfigModel cfg, MfaMethod channel) {
+        boolean sms = channel == MfaMethod.SMS_OTP;
+        String destination = sms ? SmsGateway.maskedPhoneOf(context.getUser()) : maskEmail(context.getUser().getEmail());
         int expirySeconds = resolveOtpExpiry(context, cfg);
         int maxAttempts   = resolveMaxAttempts(context);
 
@@ -340,7 +501,8 @@ public class HumifortisStepUpRouter implements Authenticator {
         if (!rl.canSendOtp(context.getUser().getId())) {
             context.challenge(
                 context.form()
-                       .setAttribute("email", maskEmail(context.getUser().getEmail()))
+                       .setAttribute("email", destination)
+                       .setAttribute("channel", sms ? "sms" : "email")
                        .setAttribute("resendCooldown", HumifortisRateLimiter.OTP_SEND_COOLDOWN_MS / 1000)
                        .createForm("humifortis-email-otp.ftl"));
             return;
@@ -358,21 +520,35 @@ public class HumifortisStepUpRouter implements Authenticator {
         context.getAuthenticationSession().setAuthNote(NOTE_EMAIL_OTP_MAX_ATTEMPTS, String.valueOf(maxAttempts));
         context.getAuthenticationSession().setAuthNote(NOTE_EMAIL_OTP_LAST_SENT,    String.valueOf(System.currentTimeMillis()));
 
-        sendOtpEmail(context, code, expirySeconds);
+        if (sms) sendOtpSms(context, code, expirySeconds); else sendOtpEmail(context, code, expirySeconds);
         rl.recordSend(userId);
 
         context.challenge(
             context.form()
-                   .setAttribute("email",         maskEmail(context.getUser().getEmail()))
+                   .setAttribute("email",         destination)
+                   .setAttribute("channel",       sms ? "sms" : "email")
                    .setAttribute("expirySeconds", expirySeconds)
                    .createForm("humifortis-email-otp.ftl"));
     }
 
+    /** The code by text message through the operator's gateway; a failure is a delivery failure, never a silent pass. */
+    private void sendOtpSms(AuthenticationFlowContext context, String code, int expirySeconds) {
+        try {
+            SmsGateway.send(context.getUser(), "Your authentication code is: " + code
+                    + ". It expires in " + expirySeconds + "s. Do not share it.");
+            logger.infof("[StepUpRouter] OTP texted to %s", SmsGateway.maskedPhoneOf(context.getUser()));
+        } catch (SmsGateway.SmsException e) {
+            throw new HumifortisEmailException(HumifortisError.SERVICE_HTTP_ERROR, "SMS send failed: " + e.getMessage());
+        }
+    }
+
     // =========================================================================
-    // EMAIL OTP — validation
+    // EMAIL / SMS OTP — validation
     // =========================================================================
 
-    void validateEmailOtp(AuthenticationFlowContext context) {
+    void validateCodeOtp(AuthenticationFlowContext context) {
+        String method        = context.getAuthenticationSession().getAuthNote(NOTE_MFA_METHOD);
+        if (method == null || method.isBlank()) method = MfaMethod.EMAIL_OTP.name();
         String submitted     = context.getHttpRequest().getDecodedFormParameters().getFirst("email_otp");
         String storedHash    = context.getAuthenticationSession().getAuthNote(NOTE_EMAIL_OTP_HASH);
         String expiryStr     = context.getAuthenticationSession().getAuthNote(NOTE_EMAIL_OTP_EXPIRY);
@@ -393,7 +569,7 @@ public class HumifortisStepUpRouter implements Authenticator {
                          - HumifortisRateLimiter.safeParseLong(startedStr, 0L);
             if (elapsed > MAX_CHALLENGE_LIFETIME_MS) {
                 invalidateOtp(context);
-                HumifortisAuditLog.log("otp_expired", userId, "EMAIL_OTP",
+                HumifortisAuditLog.log("otp_expired", userId, method,
                         "lifetime_exceeded", HumifortisError.MFA_INVALID_CODE.code, correlationId, "");
                 denyWithCode(context, HumifortisError.MFA_INVALID_CODE, "challenge lifetime exceeded");
                 return;
@@ -404,7 +580,7 @@ public class HumifortisStepUpRouter implements Authenticator {
         long expiry = HumifortisRateLimiter.safeParseLong(expiryStr, 0L);
         if (expiry == 0 || System.currentTimeMillis() > expiry) {
             invalidateOtp(context);
-            HumifortisAuditLog.log("otp_expired", userId, "EMAIL_OTP",
+            HumifortisAuditLog.log("otp_expired", userId, method,
                     "code_expired", HumifortisError.MFA_INVALID_CODE.code, correlationId, "");
             context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
                 context.form()
@@ -418,7 +594,7 @@ public class HumifortisStepUpRouter implements Authenticator {
         if (attempts >= maxAttempts) {
             invalidateOtp(context);
             rl.recordFailure(userId, getClientIp(context));
-            HumifortisAuditLog.log("otp_max_attempts", userId, "EMAIL_OTP",
+            HumifortisAuditLog.log("otp_max_attempts", userId, method,
                     "max_attempts", HumifortisError.MFA_CHALLENGE_FAILED.code, correlationId,
                     "attempts=" + attempts + "/" + maxAttempts);
             denyWithCode(context, HumifortisError.MFA_CHALLENGE_FAILED,
@@ -429,7 +605,7 @@ public class HumifortisStepUpRouter implements Authenticator {
         // ── Anti-replay ───────────────────────────────────────────────────────
         if (storedHash != null && rl.isOtpAlreadyUsed(storedHash)) {
             logger.warnf("[StepUpRouter] OTP replay detected user=%s", context.getUser().getUsername());
-            HumifortisAuditLog.log("otp_replay", userId, "EMAIL_OTP",
+            HumifortisAuditLog.log("otp_replay", userId, method,
                     "denied", HumifortisError.MFA_INVALID_CODE.code, correlationId, "replay_detected");
             denyWithCode(context, HumifortisError.MFA_INVALID_CODE, "OTP replay detected");
             return;
@@ -445,12 +621,12 @@ public class HumifortisStepUpRouter implements Authenticator {
                 org.keycloak.events.EventBuilder evt = context.getEvent().clone();
                 evt.event(org.keycloak.events.EventType.LOGIN_ERROR);
                 evt.user(context.getUser());
-                evt.detail("method", "EMAIL_OTP");
+                evt.detail("method", method);
                 evt.detail("hf_code", HumifortisError.MFA_INVALID_CODE.code);
                 // error() SENDS the event: everything it carries is set before
                 evt.error(org.keycloak.events.Errors.INVALID_USER_CREDENTIALS);
             } catch (Exception ignored) {}
-            HumifortisAuditLog.log("mfa_failure", userId, "EMAIL_OTP",
+            HumifortisAuditLog.log("mfa_failure", userId, method,
                     "invalid_code", HumifortisError.MFA_INVALID_CODE.code, correlationId,
                     "attempts=" + (attempts + 1) + "/" + maxAttempts);
             context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
@@ -466,7 +642,7 @@ public class HumifortisStepUpRouter implements Authenticator {
         rl.markOtpUsed(storedHash);
         invalidateOtp(context);
         rl.clearFailures(userId);
-        HumifortisAuditLog.log("mfa_success", userId, "EMAIL_OTP", "verified", "", correlationId, "");
+        HumifortisAuditLog.log("mfa_success", userId, method, "verified", "", correlationId, "");
 
         // ── DEVICE BINDING — issue HttpOnly browser-trust cookie ─────────────
         // Only bind when the user explicitly checked "Trust this device for 30 days".

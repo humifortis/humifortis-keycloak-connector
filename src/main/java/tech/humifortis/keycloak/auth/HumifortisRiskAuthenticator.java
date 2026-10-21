@@ -60,6 +60,10 @@ public class HumifortisRiskAuthenticator implements Authenticator {
     // Auth session note keys — shared with HumifortisHighCondition and HumifortisEventListener
     public static final String NOTE_RISK_ACTION  = "HUMIFORTIS_RISK_ACTION";
     public static final String NOTE_RISK_LEVEL   = "HUMIFORTIS_RISK_LEVEL";
+    /** The factor Humifortis decided a step-up asks for (empty when it gave none: the router then picks by its own order). */
+    public static final String NOTE_REQUIRED_FACTOR = "HUMIFORTIS_REQUIRED_FACTOR";
+    /** The weakest kind of WebAuthn credential the step-up accepts (absent: any kind). */
+    public static final String NOTE_REQUIRED_FACTOR_KIND = "HUMIFORTIS_REQUIRED_FACTOR_KIND";
 
     /**
      * Verified-Unblock challenge id (dual-source: authNote + event detail), stamped
@@ -132,12 +136,24 @@ public class HumifortisRiskAuthenticator implements Authenticator {
             serverAction = fallback.action();
         }
 
-        logger.debugf("[HumifortisRiskAuthenticator] action=%s level=%s rule=%s",
-                serverAction, riskLevel, playbookRule);
+        // The action the flow carries out is the one Humifortis resolved against the person's own factors (a passkey
+        // required of a person who has only an authenticator app is a TOTP step-up), not the policy's raw verdict.
+        String applied = appliedAction(serverDecision, serverAction);
+
+        logger.debugf("[HumifortisRiskAuthenticator] action=%s applied=%s level=%s rule=%s",
+                serverAction, applied, riskLevel, playbookRule);
 
         // Step 3 — store in auth session for downstream conditions
         context.getAuthenticationSession().setAuthNote(NOTE_RISK_LEVEL,  riskLevel);
-        context.getAuthenticationSession().setAuthNote(NOTE_RISK_ACTION, serverAction);
+        context.getAuthenticationSession().setAuthNote(NOTE_RISK_ACTION, applied);
+        if (serverDecision != null && notBlank(serverDecision.required_factor)) {
+            context.getAuthenticationSession().setAuthNote(NOTE_REQUIRED_FACTOR, serverDecision.required_factor);
+        }
+        if (serverDecision != null && notBlank(serverDecision.required_factor_kind)) {
+            context.getAuthenticationSession().setAuthNote(NOTE_REQUIRED_FACTOR_KIND, serverDecision.required_factor_kind);
+        } else {
+            context.getAuthenticationSession().removeAuthNote(NOTE_REQUIRED_FACTOR_KIND);
+        }
 
         // Step 3b — Verified-Unblock: if the server opened a verification window it
         // returns a challenge_id alongside a REQUIRE_MFA* step-up. Stamp it dual-source
@@ -161,7 +177,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         java.util.Map<String, String> sourceExtra = java.util.Map.of();
         if (serverDecision != null && local) {
             if (EvaluationContext.usable(serverDecision.context)) {
-                if (decideLocally(context, flowId, serverDecision, serverAction, mode, riskLevel, playbookRule, actions, risk)) return;
+                if (decideLocally(context, flowId, serverDecision, applied, mode, riskLevel, playbookRule, actions, risk)) return;
             } else {
                 // a missing context never opens a door: this login behaves as the server source and says so (D11)
                 logger.warnf("[HumifortisRiskAuthenticator] context_missing: HUMIFORTIS_DECISION_SOURCE=local but the response has no usable context — the platform decision is enforced");
@@ -177,13 +193,21 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                     context.getUser() != null ? context.getUser().getUsername() : "?",
                     playbookRule);
             context.getAuthenticationSession().setAuthNote("humifortis_mode",         mode);
-            context.getAuthenticationSession().setAuthNote("humifortis_would_action", serverAction);
-            if ("shadow".equals(mode)) executeSideActions(context, serverAction, actions, serverDecision);
+            context.getAuthenticationSession().setAuthNote("humifortis_would_action", applied);
+            if ("shadow".equals(mode)) executeSideActions(context, applied, actions, serverDecision);
             context.success();
             return;
         }
 
-        executeAction(context, serverAction, actions, risk, serverDecision);
+        executeAction(context, applied, actions, risk, serverDecision);
+    }
+
+    /**
+     * The action to carry out: {@code enforced_action} of the answer when it has one (the verdict after the person's
+     * factors were taken into account), else the requested action (a fallback decision has no answer).
+     */
+    public static String appliedAction(HumifortisRiskEvaluator.EvaluateResponse d, String requested) {
+        return d != null && notBlank(d.enforced_action) ? d.enforced_action : requested;
     }
 
     // =========================================================================
@@ -616,6 +640,8 @@ public class HumifortisRiskAuthenticator implements Authenticator {
             if (!"unknown".equals(ip)) extra.put("ip", ip);
             var client = context.getAuthenticationSession().getClient();
             if (client != null) extra.put("client_id", client.getClientId());
+            String protocol = context.getAuthenticationSession().getProtocol();
+            if (protocol != null && !protocol.isBlank()) extra.put("auth_method", protocol);
             String enforced = action;
             String type;
             if (d != null) {
@@ -626,6 +652,11 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                 extra.put("policy_source", d.policy_source);
                 extra.put("access_policy", d.access_policy);
                 extra.put("fallback_reason", d.fallback_reason);
+                extra.put("required_factor", d.required_factor);
+                // the weakest kind of WebAuthn credential the step-up accepts, and the assurance it reaches
+                extra.put("required_factor_kind", d.required_factor_kind);
+                if (d.achieved_assurance > 0) extra.put("achieved_assurance", String.valueOf(d.achieved_assurance));
+                if (d.assurance_shortfall) extra.put("assurance_shortfall", "true");
                 if (d.derived_signals != null && !d.derived_signals.isEmpty()) extra.put("derived_signals", String.join(",", d.derived_signals));
                 if (d.actions != null && !d.actions.isEmpty()) extra.put("all_actions", String.join(",", d.actions));
                 extra.put("device_is_new", String.valueOf(d.device_is_new));
@@ -671,7 +702,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         };
     }
 
-    private static String resolveMode(HumifortisRiskEvaluator.EvaluateResponse d) {
+    public static String resolveMode(HumifortisRiskEvaluator.EvaluateResponse d) {
         if (ENFORCEMENT_MODE_ENV != null) return ENFORCEMENT_MODE_ENV;
         if (d != null && notBlank(d.mode)) return d.mode.toLowerCase(Locale.ROOT);
         return "enforce";

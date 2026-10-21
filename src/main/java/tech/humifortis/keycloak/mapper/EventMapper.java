@@ -22,6 +22,7 @@ public class EventMapper {
     // ----------------------------------------------------------------
 
     public HumifortisEvent fromKeycloakEvent(Event event) {
+        if (ProviderFailure.is(event.getType())) return fromProviderFailure(event);
         HumifortisEvent humiEvent = new HumifortisEvent();
 
         String realmId = event.getRealmId() != null ? event.getRealmId() : "unknown";
@@ -42,7 +43,8 @@ public class EventMapper {
             humiEvent.setEntityType("user");
         }
         humiEvent.setTimestamp(Instant.ofEpochMilli(event.getTime()).toString());
-        humiEvent.setEventType(mapEventType(event.getType()));
+        humiEvent.setEventType(isDisabledAccountAttempt(event.getType(), event.getError())
+                ? ACCOUNT_DISABLED : mapEventType(event.getType()));
         humiEvent.setSource("keycloak");
         // Propagate Keycloak's native event UUID — used by core for idempotent deduplication.
         if (event.getId() != null) {
@@ -275,9 +277,45 @@ public class EventMapper {
         };
     }
 
+    /**
+     * The failure of a sign-in through an external identity provider: an event of the INTEGRATION, never of a person. Keycloak's
+     * event has no user (the failure happens before the provider says who is signing in) and no cause; the provider is named
+     * by the listener from the broker callback. Without it the failure cannot be attributed and Humifortis raises nothing.
+     */
+    private HumifortisEvent fromProviderFailure(Event event) {
+        HumifortisEvent humiEvent = new HumifortisEvent();
+        String realmId = event.getRealmId() != null ? event.getRealmId() : "unknown";
+        humiEvent.setEntityId(ProviderFailure.INTEGRATION_ENTITY_ID);
+        humiEvent.setEntityType(ProviderFailure.INTEGRATION_ENTITY_TYPE);
+        humiEvent.setTimestamp(Instant.ofEpochMilli(event.getTime()).toString());
+        humiEvent.setEventType(ProviderFailure.EVENT_TYPE);
+        humiEvent.setSource("keycloak");
+        if (event.getId() != null) humiEvent.setEventId(event.getId());
+        humiEvent.setFlowId(extractFlowId(event.getDetails(), event.getSessionId()));
+        addCommonMetadata(humiEvent, realmId, event.getClientId(), event.getIpAddress(), event.getSessionId(), null);
+        String alias = event.getDetails() != null ? event.getDetails().get("identity_provider") : null;
+        // "local" is the listener's default for a sign-in with no provider: it is not a provider
+        if (alias != null && !alias.isBlank() && !"local".equals(alias)) humiEvent.addMetadata("identity_provider", alias);
+        if (event.getError() != null) humiEvent.addMetadata("failure_code", event.getError());
+        return humiEvent;
+    }
+
     // ----------------------------------------------------------------
     // User event type mapping
     // ----------------------------------------------------------------
+
+    /** A sign-in with the right password to an account that is disabled (in Keycloak or in the directory). */
+    public static final String ACCOUNT_DISABLED = "auth_account_disabled";
+
+    /**
+     * Keycloak checks the password first and the enabled flag after it, so {@code user_disabled} means the password was
+     * right: a leaver, or someone holding the credentials of a disabled account, never password guessing. A disabled
+     * directory account reaches Keycloak this way when the federation is writable (the AD account-control mapper acts on
+     * the directory's answer only then). A wrong password stays {@code invalid_user_credentials}.
+     */
+    public static boolean isDisabledAccountAttempt(EventType type, String error) {
+        return type == EventType.LOGIN_ERROR && org.keycloak.events.Errors.USER_DISABLED.equals(error);
+    }
 
     private String mapEventType(EventType eventType) {
         return switch (eventType) {
@@ -300,6 +338,8 @@ public class EventMapper {
             case INTROSPECT_TOKEN_ERROR -> "auth_token_introspect_failed";
             case REVOKE_GRANT           -> "revoke_grant";
             case UPDATE_TOTP            -> "mfa_token_enrolled";
+            // a WebAuthn credential registered (the listener forwards only that type)
+            case UPDATE_CREDENTIAL      -> "mfa_token_enrolled";
             case REMOVE_TOTP            -> "mfa_token_deleted";
             case SEND_VERIFY_EMAIL      -> "auth_verify_email_sent";
             case SEND_RESET_PASSWORD    -> "auth_reset_password_sent";
@@ -416,6 +456,10 @@ public class EventMapper {
 
         // Identity provider — federated vs local login context
         putIfPresent(humiEvent, details, "identity_provider");
+
+        // Where the account comes from: local, ldap:<provider>, ad:<provider>, brokered:<alias>
+        putIfPresent(humiEvent, details, "account_source");
+        putIfPresent(humiEvent, details, "webauthn_credentials");
     }
 
     /** The context of a service account (client_credentials) request: how it authenticated and what it asked for. */

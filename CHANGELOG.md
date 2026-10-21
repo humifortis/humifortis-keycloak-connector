@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A failed sign-in through an external identity provider is reported against the integration**: Keycloak's
+  `IDENTITY_PROVIDER_LOGIN_ERROR` (which has no user, no provider and no cause) becomes the event
+  `identity_provider_login_failed` of `integration:keycloak`, naming the provider (read from the broker callback the listener
+  is serving), the application and the address. Humifortis raises one operational alert per provider; it is never a failed
+  password and moves nobody's risk.
+- **The protocol of the sign-in** (`auth_method`: `openid-connect` or `saml`) is on the evaluation and on the decision report, so a SAML application's sign-in is decided and recorded like an OIDC one, with its protocol on the decision record (P10).
+- **First brokered sign-in**: `first_broker_login` is `true` or `false` on every brokered evaluation (absent for a sign-in through the realm's own form), so a later sign-in is a known `false`, not an unknown.
+- **Kinds of WebAuthn credential** (docs/sso-and-external-idp-e2e.spec.md, P9): the kind (`security_key`, `device_bound`,
+  `synced`, `unknown`) is read from the backup flag the browser posts, at registration and at each step-up, and reported as
+  `mfa_method_kind` with an opaque credential reference (`webauthn_credential`). The identity metadata lists the credentials
+  held (`webauthn_credentials`). A WebAuthn registration (`UPDATE_CREDENTIAL`) is now reported as `mfa_token_enrolled`.
+  When Humifortis accepts only a stronger kind (`required_factor_kind`), the step-up router refuses a weaker credential as
+  a failed step-up.
+- **Account source** (`account_source`) on every user event and on the evaluation: `local`, `ldap:<provider>`, `ad:<provider>`
+  or `brokered:<alias>` (docs/sso-and-external-idp-e2e.spec.md, P8). Absent, never guessed, when the user cannot be resolved.
+- **Federated account age**: for a user with a federation link, the directory's creation attribute comes first, Keycloak's
+  import time only when the directory gives none (P6).
+- **Directory outage**: a failed sign-in of a person the directory imported before, with no user resolved, is reported as
+  `directory_unavailable` (with `directory` = the provider name), not as a failed password (P7).
+- **Sign-in to a disabled account**: Keycloak's `user_disabled` login error (the password was right; Keycloak checks the
+  enabled flag after it) is reported as `auth_account_disabled`, no longer as a failed sign-in counted as password guessing.
+  It covers accounts disabled in Keycloak and, with a writable Active Directory federation, in the domain.
+- **The step-up factor is decided by Humifortis** (`required_factor` of `/evaluate`, docs/assurance-and-factor-selection.spec.md): the
+  router challenges it and no longer chooses for a generic step-up. `mfa_challenge_succeeded` / `_failed` carry `required_factor`
+  beside `mfa_method`, so a degraded challenge is measurable.
+- **SMS OTP step-up** (optional): `HUMIFORTIS_SMS_GATEWAY_URL` (+ `_TOKEN`, `HUMIFORTIS_SMS_PHONE_ATTRIBUTE`). A person without a verified
+  email but with a number is texted through the operator's gateway; `SMS_OTP` is the last of the default fallback order.
+- **Session check** required action (`humifortis-session-check`): evaluates a sign-in that reuses an SSO session; a deny or
+  step-up ends the reused session. Enable it in Authentication → Required actions.
+
+### Changed
+- **Keycloak 26.8.1** is the one version the connector is built and tested against (was 23.0.3). No code change was
+  needed; a Keycloak release with different extension APIs is served by a fork of the connector, not by this one.
+
+### Fixed
+- **The factor Humifortis resolved is the one carried out.** A passkey required of a person who has only an authenticator
+  app is a TOTP step-up for Humifortis; the risk authenticator used the raw verdict and the router asked for an email code.
+  It now applies `enforced_action`.
+- **A wrong code of Keycloak's OTP form is a failed step-up**, no longer a failed password (it counted as credential
+  guessing).
+- **TOTP step-up**: the step-up router now runs Keycloak's own OTP form inside its step, as it already did for
+  WebAuthn. Before, it delegated to an `auth-otp-form` placed next to it as ALTERNATIVE, which Keycloak ignores beside
+  REQUIRED steps: a person with an authenticator app who was asked for TOTP ended on an error page. A person without
+  a TOTP credential gets the email code instead. The MFA sub-flow needs no `auth-otp-form` any more (remove it).
+
+### Added
+- **Token exchange is evaluated** (optional, per client policy): the executor *humifortis-token-exchange-risk*, same behaviour
+  as the refresh stage.
+- **Refresh tokens are evaluated** (optional, per client policy): the executor *humifortis-token-refresh-risk* refuses a
+  refresh on a deny or a step-up (`invalid_grant` / `humifortis_risk`); fail-open, nothing refused in `dry_run` / `shadow`.
+- **Password grant is evaluated** (optional): *Humifortis Direct Grant Risk*, a step for the Direct grant flow. A deny or a
+  step-up refuses the token (`401 humifortis_risk`); fail-open on no answer, nothing refused in `dry_run` / `shadow`.
+- **Brokered logins report their identity provider**: `identity_provider` is the real alias (it was always `local`), and
+  `first_broker_login` marks the first login with a provider.
+- **A step-up that no factor answered is reported.** When Humifortis asks for a second factor and the person is signed in
+  with none (the realm has no MFA sub-flow), the connector logs the misconfiguration and sends a second decision report for
+  the flow (`outcome=allow`, `divergence=step_up_not_executed`) instead of leaving "step_up" as the last word. INSTALLATION.md
+  now documents the MFA sub-flow.
 - **Local decision source** (`HUMIFORTIS_DECISION_SOURCE=local`, or *Decision source* on the risk authenticator for one
   flow): the connector asks for the evaluation context (`/evaluate?include=context`), writes it into the authentication
   session (allowlisted, bounded, rewritten at every evaluation) and the realm's own flow decides, with the conditions

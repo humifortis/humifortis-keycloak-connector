@@ -218,6 +218,56 @@ class EventMapperTest {
     }
 
     @Test
+    void loginError_userDisabled_isASignInToADisabledAccount_notAFailedPassword() {
+        Event disabled = buildEvent(UUID.randomUUID().toString(), EventType.LOGIN_ERROR);
+        disabled.setError("user_disabled");
+        assertEquals("auth_account_disabled", mapper.fromKeycloakEvent(disabled).getEventType(),
+            "Keycloak checks the enabled flag after the password: the password was right");
+        assertEquals("user_disabled", mapper.fromKeycloakEvent(disabled).getMetadata().get("error"));
+
+        Event wrong = buildEvent(UUID.randomUUID().toString(), EventType.LOGIN_ERROR);
+        wrong.setError("invalid_user_credentials");
+        assertEquals("auth_login_failed", mapper.fromKeycloakEvent(wrong).getEventType());
+
+        Event locked = buildEvent(UUID.randomUUID().toString(), EventType.LOGIN_ERROR);
+        locked.setError("user_temporarily_disabled");
+        assertEquals("auth_login_failed", mapper.fromKeycloakEvent(locked).getEventType(),
+            "a brute-force lockout is the throttle's refusal, handled by the listener");
+    }
+
+    @Test
+    void identityProviderLoginError_isAnEventOfTheIntegration_neverOfAPerson() {
+        Event event = buildEvent(UUID.randomUUID().toString(), EventType.IDENTITY_PROVIDER_LOGIN_ERROR);
+        event.setUserId(null); // Keycloak has no user: the failure happens before the provider says who is signing in
+        event.setClientId("demo-app");
+        event.setIpAddress("198.51.100.7");
+        event.setError("identity_provider_login_failure");
+        event.getDetails().put("code_id", "flow-1");
+        event.getDetails().put("identity_provider", "corp-idp"); // named by the listener from the broker callback
+
+        HumifortisEvent result = mapper.fromKeycloakEvent(event);
+
+        assertEquals("identity_provider_login_failed", result.getEventType());
+        assertEquals("integration:keycloak", result.getEntityId(), "not an \"anonymous\" person");
+        assertEquals("integration", result.getEntityType());
+        assertEquals("corp-idp", result.getMetadata().get("identity_provider"));
+        assertEquals("identity_provider_login_failure", result.getMetadata().get("failure_code"));
+        assertEquals("demo-app", result.getMetadata().get("client_id"));
+        assertEquals("198.51.100.7", result.getMetadata().get("ip"));
+        assertFalse(result.getMetadata().containsKey("error"), "it is not a failed login: no \"error\" for the credential rules");
+    }
+
+    @Test
+    void identityProviderLoginError_withNoProviderNamed_carriesNone() {
+        Event event = buildEvent(UUID.randomUUID().toString(), EventType.IDENTITY_PROVIDER_LOGIN_ERROR);
+        event.setUserId(null);
+        event.getDetails().put("identity_provider", "local"); // the listener's default for a sign-in with no provider
+        assertFalse(mapper.fromKeycloakEvent(event).getMetadata().containsKey("identity_provider"),
+            "\"local\" is not a provider: nothing to attribute the failure to");
+        assertFalse(mapper.fromKeycloakEvent(buildEvent("x", EventType.IDENTITY_PROVIDER_LOGIN_ERROR)).getMetadata().containsKey("identity_provider"));
+    }
+
+    @Test
     void clientLoginError_isAFailedServiceAccountLoginWithoutAUser() {
         Event event = buildEvent(UUID.randomUUID().toString(), EventType.CLIENT_LOGIN_ERROR);
         event.setUserId(null);

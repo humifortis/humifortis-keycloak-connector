@@ -62,6 +62,10 @@ public class HumifortisRiskEvaluator {
     private static final RateLimitedLog misconfigLog = new RateLimitedLog(60_000);
     private static final RateLimitedLog failureLog = new RateLimitedLog(60_000);
 
+    /** The event of a password sign-in; {@link #EVENT_SESSION_REUSED} is an existing session used for another application. */
+    public static final String EVENT_CREDENTIAL_VERIFIED = "auth_credential_verified";
+    public static final String EVENT_SESSION_REUSED = "auth_session_reused";
+
     private final KeycloakSession     session;
     private final SaasConfig          config;
     private final HumifortisTransport transport;
@@ -103,12 +107,22 @@ public class HumifortisRiskEvaluator {
      * budget (retries included). Without an answer, the result carries no decision and says
      * why ({@link EvaluationResult#fallbackReason()}): the authenticator applies the fallback policy.
      */
+    /** A person's decision outside a browser flow (the token stages); null when Humifortis did not answer. */
+    public EvaluateResponse decisionFor(RealmModel realm, UserModel user, String flowId) {
+        return evaluateDetailed(realm, user, flowId, false).decision();
+    }
+
     EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId) {
         return evaluateDetailed(realm, knownUser, flowId, DecisionSource.isLocal());
     }
 
     /** As above; {@code local} asks the server for the evaluation context (HUMIFORTIS_DECISION_SOURCE=local). */
     EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId, boolean local) {
+        return evaluateDetailed(realm, knownUser, flowId, local, EVENT_CREDENTIAL_VERIFIED);
+    }
+
+    /** As above, for the authentication event {@code eventType} (a reused session is not a credential check). */
+    EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId, boolean local, String eventType) {
         if (knownUser == null) {
             logger.warnf("[HumifortisRiskEvaluator] User is null — fallback");
             return EvaluationResult.fallback("null_user");
@@ -134,7 +148,7 @@ public class HumifortisRiskEvaluator {
             event.event_id    = callId;
             event.entity_id   = entityId;
             event.entity_type = "user"; // must match entity_type sent by HumifortisEventListener so /evaluate reads the same Redis risk key as /events
-            event.event_type  = "auth_credential_verified"; // credentials confirmed; session NOT yet established
+            event.event_type  = eventType; // by default: credentials confirmed, session NOT yet established
             event.source      = "keycloak"; // provenance of every extracted feature (same as HumifortisEventListener)
             event.timestamp   = Instant.now().toString();
             event.flow_id     = flowId; // propagate Keycloak auth session id — groups with enforcement events
@@ -205,6 +219,12 @@ public class HumifortisRiskEvaluator {
             var as = session.getContext().getAuthenticationSession();
             return as != null && as.getClient() != null ? as.getClient().getClientId() : null;
         });
+        // the protocol of the sign-in (openid-connect | saml), as Keycloak names it on its own events (auth_method)
+        safeCollect(meta, "auth_method", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            String protocol = as != null ? as.getProtocol() : null;
+            return protocol != null && !protocol.isBlank() ? protocol : null;
+        });
         safeCollect(meta, "client_name", () -> {
             var as = session.getContext().getAuthenticationSession();
             String name = as != null && as.getClient() != null ? as.getClient().getName() : null;
@@ -259,11 +279,10 @@ public class HumifortisRiskEvaluator {
                     ? as.getParentSession().getId() : null;
         });
 
-        safeCollect(meta, "identity_provider", () -> {
-            var as = session.getContext().getAuthenticationSession();
-            String idp = as != null ? as.getAuthNote("identity_provider") : null;
-            return (idp != null && !idp.isBlank()) ? idp : "local";
-        });
+        safeCollect(meta, "identity_provider", () -> BrokerContext.identityProvider(session.getContext().getAuthenticationSession()));
+        // a brokered sign-in says whether it is the first one (true / false); a sign-in through the realm's own form has no
+        // provider, so the question does not apply and the value is absent
+        safeCollect(meta, "first_broker_login", () -> BrokerContext.firstBrokerLoginOf(session.getContext().getAuthenticationSession()));
 
         // Device signals — collected by HumifortisDeviceCollectorAuthenticator (step before this one)
         safeCollect(meta, "device_id", () -> {
@@ -406,9 +425,17 @@ public class HumifortisRiskEvaluator {
         }
     }
 
+    /**
+     * The factors this person can answer a step-up with: her enrolled credentials, the email code when her email is
+     * verified, the text message when she has a number and a gateway is configured. A person with none is announced as
+     * EMAIL_OTP, so that the router explains the refusal (no verified email) rather than the decision being unresolvable.
+     */
     private List<String> detectAvailableMethods(UserModel user) {
         try {
             List<String> methods = new ArrayList<>(userContextExtractor.extractMfaMethods(user));
+            boolean email = user.isEmailVerified() && user.getEmail() != null && !user.getEmail().isBlank();
+            if (email && !methods.contains("EMAIL_OTP")) methods.add("EMAIL_OTP");
+            if (SmsGateway.canText(user) && !methods.contains("SMS_OTP")) methods.add("SMS_OTP");
             if (methods.isEmpty()) methods.add("EMAIL_OTP");
             return methods;
         } catch (Exception e) {
@@ -450,7 +477,7 @@ public class HumifortisRiskEvaluator {
     // =========================================================================
 
     // Package-private so HumifortisStepUpRouter can build entity IDs without duplication.
-    static String buildEntityId(RealmModel realm, UserModel user) {
+    public static String buildEntityId(RealmModel realm, UserModel user) {
         // Standard entity_id format: user:keycloak:{realmName}:{keycloakUserUUID}
         // This matches exactly what E2E tests use via ENV.USERS.alice.entityId and
         // what the risk engine stores risk state under — ensuring consistent Redis keys
@@ -642,6 +669,13 @@ public class HumifortisRiskEvaluator {
         public List<String> actions;
         @SerializedName("playbook_rule")        public String       playbook_rule;
         @SerializedName("enforced_action")      public String       enforced_action;
+        /** The factor Humifortis decided a step-up is answered with; the router challenges it and never chooses one. */
+        @SerializedName("required_factor")      public String       required_factor;
+        /** The weakest kind of WebAuthn credential the step-up accepts (empty: any); the router refuses a weaker one. */
+        @SerializedName("required_factor_kind") public String       required_factor_kind;
+        @SerializedName("required_assurance")   public int          required_assurance;
+        @SerializedName("achieved_assurance")   public int          achieved_assurance;
+        @SerializedName("assurance_shortfall")  public boolean      assurance_shortfall;
         @SerializedName("fallback_reason")      public String       fallback_reason;
         @SerializedName("derived_signals")      public List<String> derived_signals;
         @SerializedName("contributing_factors") public List<String> contributing_factors;

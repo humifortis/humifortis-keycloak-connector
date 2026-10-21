@@ -157,7 +157,7 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
         if (d.disable) {
             // contained before the report, so the report says what was really done
             try {
-                ClientContainment.Result done = ClientContainment.disable(client, "rule:" + result.decision().playbook_rule);
+                ClientContainment.Result done = ClientContainment.disableCommitted(session, client, "rule:" + result.decision().playbook_rule);
                 if (done == ClientContainment.Result.DISABLED) {
                     extra.put("disabled", "true");
                     LOG.warnf("[Humifortis] client %s disabled by decision %s", client.getClientId(), result.decision().playbook_rule);
@@ -203,7 +203,9 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
 
     /** The CLIENT_LOGIN_ERROR Keycloak emits when this stage refuses a request (error access_denied, reason ours). */
     public static boolean isRiskStageRefusal(boolean clientLoginError, String error, Map<String, String> details) {
-        return clientLoginError && "access_denied".equals(error) && details != null && DENY_DESCRIPTION.equals(details.get("reason"));
+        // Keycloak puts the text of a client-policy refusal in client_policy_error_detail (reason is then client_policy_error)
+        return clientLoginError && "access_denied".equals(error) && details != null
+                && (DENY_DESCRIPTION.equals(details.get("client_policy_error_detail")) || DENY_DESCRIPTION.equals(details.get("reason")));
     }
 
     static Decision decide(HumifortisRiskEvaluator.ServiceAccountResult result, String clientFallback, boolean allowDisable) {

@@ -371,6 +371,61 @@ class HumifortisStepUpRouterTest {
         verify(keycloakWebAuthn).action(context);
     }
 
+    /** A router whose Keycloak OTP form is the given mock. */
+    private static HumifortisStepUpRouter routerWithOtp(org.keycloak.authentication.Authenticator keycloakOtp) {
+        return new HumifortisStepUpRouter() {
+            @Override
+            org.keycloak.authentication.Authenticator otp(org.keycloak.authentication.AuthenticationFlowContext c) {
+                return keycloakOtp;
+            }
+        };
+    }
+
+    @Test
+    void totpRequiredAndEnrolled_runsKeycloaksOtpForm() {
+        org.keycloak.authentication.Authenticator keycloakOtp = mock(org.keycloak.authentication.Authenticator.class);
+        HumifortisStepUpRouter r = routerWithOtp(keycloakOtp);
+        var context = mock(org.keycloak.authentication.AuthenticationFlowContext.class, RETURNS_DEEP_STUBS);
+        when(context.getUser()).thenReturn(user);
+        lenient().when(user.getId()).thenReturn("u1");
+        lenient().when(user.getUsername()).thenReturn("alice");
+        when(user.credentialManager()).thenReturn(creds);
+        when(creds.getStoredCredentialsStream()).thenAnswer(i -> Stream.of(cred("otp")));
+        when(context.getAuthenticationSession().getAuthNote(HumifortisRiskAuthenticator.NOTE_RISK_ACTION)).thenReturn("REQUIRE_TOTP");
+        lenient().when(context.getConnection().getRemoteAddr()).thenReturn("203.0.113.9");
+
+        r.authenticate(context);
+        verify(keycloakOtp).authenticate(context);
+        verify(context, never()).attempted();
+        verify(context.getAuthenticationSession()).setAuthNote(HumifortisStepUpRouter.NOTE_MFA_METHOD, "TOTP");
+
+        when(context.getAuthenticationSession().getAuthNote(HumifortisStepUpRouter.NOTE_MFA_METHOD)).thenReturn("TOTP");
+        r.action(context);
+        verify(keycloakOtp).action(context);
+        verify(context, never()).attempted();
+    }
+
+    @Test
+    void totpChosenForAUserWithoutTotp_degradesToEmailOtp_neverRunsTheOtpForm() {
+        org.keycloak.authentication.Authenticator keycloakOtp = mock(org.keycloak.authentication.Authenticator.class);
+        HumifortisStepUpRouter r = routerWithOtp(keycloakOtp);
+        var context = mock(org.keycloak.authentication.AuthenticationFlowContext.class, RETURNS_DEEP_STUBS);
+        when(context.getUser()).thenReturn(user);
+        lenient().when(user.getId()).thenReturn("u1");
+        lenient().when(user.getUsername()).thenReturn("alice");
+        when(user.credentialManager()).thenReturn(creds);
+        when(creds.getStoredCredentialsStream()).thenAnswer(i -> Stream.empty());
+        when(user.isEmailVerified()).thenReturn(false); // no email either: the step-up cannot be delivered
+        // the router's default method is TOTP and no action note is set
+        when(context.getAuthenticatorConfig()).thenReturn(config("default.method", "TOTP"));
+        lenient().when(context.getConnection().getRemoteAddr()).thenReturn("203.0.113.9");
+
+        r.authenticate(context);
+        verify(keycloakOtp, never()).authenticate(context);
+        verify(context.getAuthenticationSession()).setAuthNote(HumifortisStepUpRouter.NOTE_MFA_METHOD, "EMAIL_OTP");
+        verify(context).failure(eq(org.keycloak.authentication.AuthenticationFlowError.ACCESS_DENIED), any());
+    }
+
     @Test
     void webauthnRequiredNotEnrolled_resolvesToEmailOtp() {
         when(user.credentialManager()).thenReturn(creds);

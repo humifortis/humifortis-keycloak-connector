@@ -85,6 +85,10 @@ public class HumifortisEventListener implements EventListenerProvider {
             EventType.REFRESH_TOKEN_ERROR,
             EventType.REMOVE_TOTP,
             EventType.UPDATE_TOTP,
+            // a sign-in through an external identity provider that failed on the provider's side (about the integration)
+            EventType.IDENTITY_PROVIDER_LOGIN_ERROR,
+            // a WebAuthn credential registered (only that type: passwords and app codes have their own events)
+            EventType.UPDATE_CREDENTIAL,
             EventType.IMPERSONATE,
             EventType.GRANT_CONSENT,
             EventType.REVOKE_GRANT,
@@ -164,6 +168,11 @@ public class HumifortisEventListener implements EventListenerProvider {
                 event.getType() == EventType.CLIENT_LOGIN_ERROR, event.getError(), event.getDetails())) {
             return;
         }
+        // Same for the refusal of a refresh or a token exchange by a token risk stage
+        if ((event.getType() == EventType.REFRESH_TOKEN_ERROR || event.getType() == EventType.TOKEN_EXCHANGE_ERROR)
+                && tech.humifortis.keycloak.token.TokenRiskStage.isRefusal(event.getDetails())) {
+            return;
+        }
 
         // An attempt refused by the account's temporary lockout (a Humifortis throttle or Keycloak's own): enforcement,
         // not a wrong password. Counting it would feed the detector that created the throttle and extend it forever.
@@ -174,31 +183,57 @@ public class HumifortisEventListener implements EventListenerProvider {
 
         // Path B: standard security event
         if (MONITORED_EVENTS.contains(event.getType())) {
+            if (event.getType() == EventType.UPDATE_CREDENTIAL && !isWebAuthnRegistration(event)) return;
             try {
+                // a sign-in the directory could not answer is the directory's failure, not a wrong password (P7)
+                boolean directoryDown = DirectoryOutage.mark(session, event);
+                // a failed sign-in through an identity provider names the provider Keycloak is serving the callback of
+                if (tech.humifortis.keycloak.mapper.ProviderFailure.is(event.getType()) && event.getDetails() != null) {
+                    String alias = tech.humifortis.keycloak.mapper.ProviderFailure.aliasOfRequest(session);
+                    if (alias != null) event.getDetails().put("identity_provider", alias);
+                }
                 enrichEvent(event);
                 if (ServiceAccountContext.isClientCredentialsEvent(event.getType())) {
                     enrichServiceAccount(event);
                 }
 
                 // The step-up the router ran in this flow (the factor it challenged), or null when none ran.
-                String stepUpMethod = stepUpMethod();
+                String stepUpMethod = stepUpMethod(event);
 
                 // A LOGIN concluding a flow in which the router ran a step-up: the step-up succeeded. Reported
                 // BEFORE the login success (it discharges the evidence the step-up answered).
                 if (event.getType() == EventType.LOGIN && stepUpMethod != null) {
                     String challengeId = resolveChallengeId(event);
                     HumifortisEvent stepUp = eventMapper.fromStepUpSucceeded(event, stepUpMethod, challengeId);
+                    stepUp.addMetadata("required_factor", flowNote(event, tech.humifortis.keycloak.auth.HumifortisRiskAuthenticator.NOTE_REQUIRED_FACTOR));
+                    addWebAuthnKind(event, stepUp, stepUpMethod);
                     sendAsync(stepUp, EventMapper.STEP_UP_SUCCEEDED);
                 }
 
                 HumifortisEvent humiEvent = eventMapper.fromKeycloakEvent(event);
+                if (directoryDown) {
+                    humiEvent.setEventType(DirectoryOutage.REASON);
+                    humiEvent.addMetadata(DirectoryOutage.DETAIL_REASON, DirectoryOutage.REASON);
+                    humiEvent.addMetadata(DirectoryOutage.DETAIL_DIRECTORY, event.getDetails().get(DirectoryOutage.DETAIL_DIRECTORY));
+                }
                 // A login error AFTER the step-up was challenged is a failed step-up (a wrong code), never a
                 // wrong password: it is not credential guessing.
                 if (event.getType() == EventType.LOGIN_ERROR && stepUpMethod != null) {
                     humiEvent.setEventType(EventMapper.STEP_UP_FAILED);
                     humiEvent.addMetadata("mfa_method", stepUpMethod);
+                    humiEvent.addMetadata("required_factor", flowNote(event, tech.humifortis.keycloak.auth.HumifortisRiskAuthenticator.NOTE_REQUIRED_FACTOR));
+                    addWebAuthnKind(event, humiEvent, stepUpMethod);
+                }
+                if (event.getType() == EventType.UPDATE_CREDENTIAL) {
+                    addRegisteredKind(event, humiEvent);
                 }
                 sendAsync(humiEvent, event.getType().name());
+
+                // A LOGIN after a step-up decision that no factor answered: the realm has no MFA sub-flow, and the
+                // decision report must not keep saying "step_up" for a person signed in without one.
+                if (event.getType() == EventType.LOGIN && stepUpMethod == null) {
+                    reportSkippedStepUp(event);
+                }
             } catch (Exception e) {
                 logger.errorf("[HumifortisEventListener] Error mapping/sending event %s: %s",
                         event.getType(), e.getMessage());
@@ -451,15 +486,85 @@ public class HumifortisEventListener implements EventListenerProvider {
     // ── Step-up ───────────────────────────────────────────────────────────────
 
     /** The factor the step-up router challenged in this authentication session, or null when no step-up ran. */
-    private String stepUpMethod() {
+    private void reportSkippedStepUp(Event event) {
+        var as = session.getContext().getAuthenticationSession();
+        RealmModel realm = session.getContext().getRealm();
+        if (as == null || realm == null || event.getUserId() == null) return;
+        tech.humifortis.keycloak.auth.StepUpExecution.reportIfSkipped(as, realm,
+                session.users().getUserById(realm, event.getUserId()));
+    }
+
+    /** A WebAuthn credential registered (Keycloak's UPDATE_CREDENTIAL of type webauthn or webauthn-passwordless). */
+    static boolean isWebAuthnRegistration(Event event) {
+        String type = event.getDetails() != null ? event.getDetails().get("credential_type") : null;
+        return type != null && type.startsWith("webauthn");
+    }
+
+    /** The kind of the WebAuthn credential the step-up presented, and its reference (P9). */
+    private void addWebAuthnKind(Event event, HumifortisEvent humiEvent, String stepUpMethod) {
+        if (!"WEBAUTHN".equals(stepUpMethod)) return;
+        String kind = flowNote(event, tech.humifortis.keycloak.auth.HumifortisStepUpRouter.NOTE_MFA_KIND);
+        String ref = flowNote(event, tech.humifortis.keycloak.auth.HumifortisStepUpRouter.NOTE_MFA_CREDENTIAL);
+        if (kind != null) humiEvent.addMetadata("mfa_method_kind", kind);
+        if (ref != null) humiEvent.addMetadata("webauthn_credential", ref);
+    }
+
+    /**
+     * A registration: the credential's kind from its stored transports and the backup-eligible flag of the attestation the
+     * browser posted in this same request (Keycloak does not keep the flag).
+     */
+    private void addRegisteredKind(Event event, HumifortisEvent humiEvent) {
+        humiEvent.addMetadata("mfa_method", "WEBAUTHN");
         try {
-            var as = session.getContext().getAuthenticationSession();
-            if (as == null) return null;
-            String m = as.getAuthNote(tech.humifortis.keycloak.auth.HumifortisStepUpRouter.NOTE_MFA_METHOD);
-            return m != null && !m.isBlank() ? m : null;
+            var realm = session.getContext().getRealm();
+            var user = realm != null && event.getUserId() != null ? session.users().getUserById(realm, event.getUserId()) : null;
+            if (user == null) return;
+            var stored = tech.humifortis.keycloak.user.WebAuthnKinds.find(
+                    tech.humifortis.keycloak.user.WebAuthnKinds.stored(user), event.getDetails().get("public_key_credential_id"));
+            Boolean backup = null;
+            var request = session.getContext().getHttpRequest();
+            if (request != null) {
+                backup = tech.humifortis.keycloak.user.WebAuthnKinds.backupEligible(
+                        tech.humifortis.keycloak.user.WebAuthnKinds.authDataOfAttestation(
+                                tech.humifortis.keycloak.user.WebAuthnKinds.decode(request.getDecodedFormParameters().getFirst("attestationObject"))));
+            }
+            humiEvent.addMetadata("mfa_method_kind", tech.humifortis.keycloak.user.WebAuthnKinds.kind(stored != null ? stored.transports() : List.of(), backup));
+            if (stored != null && stored.ref() != null) humiEvent.addMetadata("webauthn_credential", stored.ref());
+        } catch (RuntimeException e) {
+            logger.debugf("[HumifortisEventListener] WebAuthn registration kind unreadable: %s", e.getMessage());
+        }
+    }
+
+    private String stepUpMethod(Event event) {
+        return flowNote(event, tech.humifortis.keycloak.auth.HumifortisStepUpRouter.NOTE_MFA_METHOD);
+    }
+
+    /** A note the authentication of this event's flow carries (the router's and the risk step's), or null. */
+    private String flowNote(Event event, String note) {
+        try {
+            String m = noteOf(session.getContext().getAuthenticationSession(), note);
+            if (m != null) return m;
+            // The event of a refused factor can fire where the request has no authentication session of its own (the
+            // form post of Keycloak's OTP form): the event names the root session, whose tabs carry the router's note.
+            String rootId = event.getDetails() != null ? event.getDetails().get("code_id") : null;
+            RealmModel realm = session.getContext().getRealm();
+            if (rootId == null || rootId.isBlank() || realm == null) return null;
+            var root = session.authenticationSessions().getRootAuthenticationSession(realm, rootId);
+            if (root == null) return null;
+            for (var tab : root.getAuthenticationSessions().values()) {
+                m = noteOf(tab, note);
+                if (m != null) return m;
+            }
+            return null;
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private static String noteOf(org.keycloak.sessions.AuthenticationSessionModel as, String note) {
+        if (as == null) return null;
+        String m = as.getAuthNote(note);
+        return m != null && !m.isBlank() ? m : null;
     }
 
     /**

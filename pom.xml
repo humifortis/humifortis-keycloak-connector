@@ -25,7 +25,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
-        <keycloak.version>23.0.3</keycloak.version>
+        <!-- The one Keycloak version this connector is built and tested against (a fork targets another one). -->
+        <keycloak.version>26.8.1</keycloak.version>
         <gson.version>2.10.1</gson.version>
         <!-- GeoIP and UA parsing removed — handled server-side by humifortis-core -->
     </properties>
@@ -92,6 +93,13 @@
             <groupId>org.mockito</groupId>
             <artifactId>mockito-junit-jupiter</artifactId>
             <version>5.11.0</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- JAX-RS runtime so unit tests can build a Response (Keycloak provides its own at run time) -->
+        <dependency>
+            <groupId>org.jboss.resteasy</groupId>
+            <artifactId>resteasy-core</artifactId>
+            <version>6.2.4.Final</version>
             <scope>test</scope>
         </dependency>
         <!-- jboss-logging impl for tests (provided by Keycloak in prod) -->

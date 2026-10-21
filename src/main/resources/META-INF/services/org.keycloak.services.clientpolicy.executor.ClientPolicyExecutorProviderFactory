@@ -1,1 +1,3 @@
 tech.humifortis.keycloak.serviceaccount.ServiceAccountRiskExecutorFactory
+tech.humifortis.keycloak.token.TokenRefreshRiskExecutorFactory
+tech.humifortis.keycloak.token.TokenExchangeRiskExecutorFactory

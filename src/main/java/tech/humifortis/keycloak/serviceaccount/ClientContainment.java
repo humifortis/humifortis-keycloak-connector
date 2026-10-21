@@ -3,6 +3,8 @@ package tech.humifortis.keycloak.serviceaccount;
 import java.time.Instant;
 
 import org.keycloak.models.ClientModel;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.utils.KeycloakModelUtils;
 
 /**
  * Disabling a service account's client: the one persistent containment the connector performs for a machine, by the
@@ -44,6 +46,24 @@ public final class ClientContainment {
         client.setEnabled(false);
         client.setAttribute(ATTR_DISABLED_AT, Instant.now().toString());
         client.setAttribute(ATTR_DISABLED_BY, by);
+        return Result.DISABLED;
+    }
+
+    /**
+     * As {@link #disable}, committed in a transaction of its own. A stage that disables a client and then refuses the
+     * request ends the request with an error response, and Keycloak rolls the request's transaction back on every error
+     * response: a disable written in it would be lost. Used by the risk stage; the analyst path (no error response) uses
+     * {@link #disable}.
+     */
+    public static Result disableCommitted(KeycloakSession session, ClientModel client, String by) {
+        if (!allowsDisable(client)) return Result.NOT_ALLOWED;
+        if (!client.isEnabled()) return Result.ALREADY_DISABLED;
+        String realmId = client.getRealm().getId();
+        String clientId = client.getId();
+        KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), inner -> {
+            ClientModel target = inner.realms().getRealm(realmId).getClientById(clientId);
+            if (target != null) disable(target, by);
+        });
         return Result.DISABLED;
     }
 

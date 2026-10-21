@@ -8,7 +8,7 @@ This project implements a thin client connector that integrates Keycloak (versio
 **License:** Apache 2.0  
 **Language:** Java 17+  
 **Build System:** Maven  
-**Target Platform:** Keycloak 22+
+**Target Platform:** Keycloak 26.8.1
 
 ## Architecture Philosophy
 
@@ -305,7 +305,7 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
 ```yaml
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:23.0
+    image: quay.io/keycloak/keycloak:26.8.1
     environment:
       - HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
     volumes:

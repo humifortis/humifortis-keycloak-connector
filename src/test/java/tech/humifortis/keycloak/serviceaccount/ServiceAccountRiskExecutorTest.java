@@ -171,6 +171,11 @@ class ServiceAccountRiskExecutorTest {
     @Test
     void theRefusalErrorOfThisStageIsRecognisedAndNothingElse() {
         assertTrue(ServiceAccountRiskExecutor.isRiskStageRefusal(true, "access_denied", Map.of("reason", "humifortis_risk")));
+        // Keycloak 26: the reason is client_policy_error and the text of the refusal is its detail
+        assertTrue(ServiceAccountRiskExecutor.isRiskStageRefusal(true, "access_denied",
+                Map.of("reason", "client_policy_error", "client_policy_error_detail", "humifortis_risk")));
+        assertFalse(ServiceAccountRiskExecutor.isRiskStageRefusal(true, "access_denied",
+                Map.of("reason", "client_policy_error", "client_policy_error_detail", "another_policy")));
         assertFalse(ServiceAccountRiskExecutor.isRiskStageRefusal(true, "invalid_client_credentials", Map.of()), "a wrong secret stays a failure");
         assertFalse(ServiceAccountRiskExecutor.isRiskStageRefusal(true, "access_denied", Map.of("reason", "another_policy")), "another policy's refusal");
         assertFalse(ServiceAccountRiskExecutor.isRiskStageRefusal(false, "access_denied", Map.of("reason", "humifortis_risk")));

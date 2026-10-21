@@ -109,7 +109,6 @@ class UserContextExtractorTest {
         RoleModel manageUsers = clientRole("realm-management", "manage-users");
         RoleModel composite = realmRole("it-staff");
         RoleModel viewer = realmRole("viewer");
-        when(composite.isComposite()).thenReturn(true);
         when(composite.getCompositesStream()).thenAnswer(i -> Stream.of(viewer));
         GroupModel it = group("it", null);
         GroupModel admins = group("admins", it, manageUsers);
@@ -198,6 +197,90 @@ class UserContextExtractorTest {
         Instant[] out = new Instant[1];
         assertNull(UserContextExtractor.extractAccountCreation(realm, user, now, out));
         assertNull(out[0]);
+    }
+
+    @Test
+    void accountCreation_federatedAccount_isAsOldAsTheDirectorySays() {
+        RealmModel realm = mock(RealmModel.class);
+        lenient().when(user.getFederationLink()).thenReturn("ldap-component-id");
+        // imported at its first login, yesterday: Keycloak's own timestamp is not the account's age
+        lenient().when(user.getCreatedTimestamp()).thenReturn(Instant.parse("2026-10-02T00:00:00Z").toEpochMilli());
+        when(user.getFirstAttribute("createTimestamp")).thenReturn("20160115103000Z");
+        Instant[] out = new Instant[1];
+        assertEquals("attribute:createTimestamp", UserContextExtractor.extractAccountCreation(realm, user, Instant.parse("2026-10-03T00:00:00Z"), out));
+        assertEquals(Instant.parse("2016-01-15T10:30:00Z"), out[0]);
+    }
+
+    @Test
+    void accountCreation_federatedAccountWithoutDirectoryDate_fallsBackToKeycloak() {
+        RealmModel realm = mock(RealmModel.class);
+        lenient().when(user.getFederationLink()).thenReturn("ad-component-id");
+        when(user.getCreatedTimestamp()).thenReturn(Instant.parse("2026-09-01T00:00:00Z").toEpochMilli());
+        Instant[] out = new Instant[1];
+        assertEquals("keycloak", UserContextExtractor.extractAccountCreation(realm, user, Instant.parse("2026-10-03T00:00:00Z"), out));
+    }
+
+    // ── account source ───────────────────────────────────────────────────────
+
+    private static org.keycloak.component.ComponentModel provider(String providerId, String name, String vendor) {
+        org.keycloak.component.ComponentModel c = new org.keycloak.component.ComponentModel();
+        c.setProviderId(providerId);
+        c.setName(name);
+        if (vendor != null) c.getConfig().putSingle("vendor", vendor);
+        return c;
+    }
+
+    private KeycloakSession sessionWithIdentityLinks(RealmModel realm, String... aliases) {
+        KeycloakSession session = mock(KeycloakSession.class, Answers.RETURNS_DEEP_STUBS);
+        lenient().when(session.users().getFederatedIdentitiesStream(realm, user)).thenAnswer(i -> Stream.of(aliases)
+                .map(a -> new org.keycloak.models.FederatedIdentityModel(a, a + "-subject", a + "-user")));
+        return session;
+    }
+
+    @Test
+    void accountSource_localAccount() {
+        RealmModel realm = mock(RealmModel.class);
+        lenient().when(user.credentialManager()).thenReturn(credentials);
+        assertEquals("local", UserContextExtractor.accountSource(sessionWithIdentityLinks(realm), realm, user));
+    }
+
+    @Test
+    void accountSource_directoryFederation_namesTheProviderAndTellsActiveDirectoryApart() {
+        RealmModel realm = mock(RealmModel.class);
+        when(user.getFederationLink()).thenReturn("c1");
+        when(realm.getComponent("c1")).thenReturn(provider("ldap", "corp-ldap", "other"));
+        assertEquals("ldap:corp-ldap", UserContextExtractor.accountSource(sessionWithIdentityLinks(realm), realm, user));
+        when(realm.getComponent("c1")).thenReturn(provider("ldap", "corp-ad", "ad"));
+        assertEquals("ad:corp-ad", UserContextExtractor.accountSource(sessionWithIdentityLinks(realm), realm, user));
+        when(realm.getComponent("c1")).thenReturn(provider("kerberos", "corp-krb", null));
+        assertEquals("kerberos:corp-krb", UserContextExtractor.accountSource(sessionWithIdentityLinks(realm), realm, user));
+    }
+
+    @Test
+    void accountSource_createdThroughAnIdentityProvider_isBrokered() {
+        RealmModel realm = mock(RealmModel.class);
+        when(user.credentialManager()).thenReturn(credentials);
+        when(credentials.getStoredCredentialsByTypeStream("password")).thenAnswer(i -> Stream.empty());
+        // several links: the first by name, so the source is the same on every event
+        assertEquals("brokered:corp-idp", UserContextExtractor.accountSource(sessionWithIdentityLinks(realm, "google", "corp-idp"), realm, user));
+        assertEquals("brokered:corp-idp", UserContextExtractor.accountSource(sessionWithIdentityLinks(realm, "corp-idp"), realm, user));
+    }
+
+    @Test
+    void accountSource_aLocalAccountLinkedToAnIdentityProvider_staysLocal() {
+        RealmModel realm = mock(RealmModel.class);
+        when(user.credentialManager()).thenReturn(credentials);
+        CredentialModel password = new CredentialModel();
+        password.setType("password");
+        when(credentials.getStoredCredentialsByTypeStream("password")).thenAnswer(i -> Stream.of(password));
+        assertEquals("local", UserContextExtractor.accountSource(sessionWithIdentityLinks(realm, "corp-idp"), realm, user));
+    }
+
+    @Test
+    void accountSource_unreadable_isNotGuessed() {
+        RealmModel realm = mock(RealmModel.class);
+        when(user.getFederationLink()).thenThrow(new IllegalStateException("store down"));
+        assertNull(UserContextExtractor.accountSource(mock(KeycloakSession.class), realm, user));
     }
 
     @Test

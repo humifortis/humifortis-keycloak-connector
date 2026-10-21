@@ -13,6 +13,10 @@ import java.util.List;
  *                             {@code group:<path>}), null when not privileged
  * @param accountCreatedAt     account creation time, null when unknown
  * @param accountCreatedSource {@code keycloak} or {@code attribute:<name>} (federated users)
+ * @param accountSource        where the account comes from: {@code local}, {@code ldap:<provider>} / {@code ad:<provider>}
+ *                             (a directory federation), {@code brokered:<alias>} (created through an identity provider)
+ * @param webauthnCredentials  the WebAuthn credentials held: {@code <ref>:<transport>+<transport>,...} (see {@link WebAuthnKinds}),
+ *                             null when none
  */
 public record UserContextSnapshot(
         String username,
@@ -29,7 +33,9 @@ public record UserContextSnapshot(
         Instant accountCreatedAt,
         String accountCreatedSource,
         Long accountAgeDays,
-        long activeSessionCount
+        long activeSessionCount,
+        String accountSource,
+        String webauthnCredentials
 ) {
     /** The identity fields every Humifortis event carries, as connector metadata keys. */
     public void writeTo(java.util.function.BiConsumer<String, String> put) {
@@ -48,5 +54,7 @@ public record UserContextSnapshot(
         }
         if (accountAgeDays != null) put.accept("account_age_days", String.valueOf(accountAgeDays));
         put.accept("active_session_count", String.valueOf(activeSessionCount));
+        if (accountSource != null) put.accept("account_source", accountSource);
+        if (webauthnCredentials != null) put.accept("webauthn_credentials", webauthnCredentials);
     }
 }

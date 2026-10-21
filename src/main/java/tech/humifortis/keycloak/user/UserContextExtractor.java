@@ -16,7 +16,9 @@ import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.keycloak.component.ComponentModel;
 import org.keycloak.models.ClientModel;
+import org.keycloak.models.FederatedIdentityModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -96,7 +98,9 @@ public class UserContextExtractor {
                 privilegedReason,
                 createdAt[0], createdSource,
                 ageDays,
-                activeSessionCount
+                activeSessionCount,
+                accountSource(session, realm, user),
+                WebAuthnKinds.held(WebAuthnKinds.stored(user))
         );
     }
 
@@ -208,6 +212,11 @@ public class UserContextExtractor {
      * returns its source; a future time is discarded (clock skew, bad data).
      */
     static String extractAccountCreation(RealmModel realm, UserModel user, Instant now, Instant[] out) {
+        // a federated account is as old as the directory says: Keycloak stamps it when it is imported, at the first login
+        if (isFederated(user)) {
+            String fromDirectory = creationFromAttributes(realm, user, now, out);
+            if (fromDirectory != null) return fromDirectory;
+        }
         Long ts = user.getCreatedTimestamp();
         if (ts != null && ts > 0) {
             Instant created = Instant.ofEpochMilli(ts);
@@ -216,6 +225,10 @@ public class UserContextExtractor {
                 return "keycloak";
             }
         }
+        return creationFromAttributes(realm, user, now, out);
+    }
+
+    private static String creationFromAttributes(RealmModel realm, UserModel user, Instant now, Instant[] out) {
         String configured = realm.getAttribute(ATTR_CREATED_ATTRIBUTES);
         for (String attr : csv(configured != null ? configured : DEFAULT_CREATED_ATTRIBUTES)) {
             Instant created = parseTimestamp(user.getFirstAttribute(attr));
@@ -225,6 +238,41 @@ public class UserContextExtractor {
             }
         }
         return null;
+    }
+
+    private static boolean isFederated(UserModel user) {
+        String link = user.getFederationLink();
+        return link != null && !link.isBlank();
+    }
+
+    /**
+     * Where the account comes from (its origin, not how this sign-in was checked): {@code ldap:<provider>} or
+     * {@code ad:<provider>} for a user of a directory federation (the provider's vendor setting decides; another
+     * federation provider is {@code <provider id>:<name>}), {@code brokered:<alias>} for an account created through an
+     * identity provider (linked to one and with no password of its own), otherwise {@code local}. Never throws: a source
+     * that cannot be read is {@code null} and is not sent.
+     */
+    public static String accountSource(KeycloakSession session, RealmModel realm, UserModel user) {
+        try {
+            if (isFederated(user)) {
+                ComponentModel provider = realm.getComponent(user.getFederationLink());
+                if (provider == null) return "federated:" + user.getFederationLink();
+                String type = provider.getProviderId();
+                if ("ldap".equals(type)) {
+                    String vendor = provider.getConfig() != null ? provider.getConfig().getFirst("vendor") : null;
+                    type = "ad".equalsIgnoreCase(vendor) ? "ad" : "ldap";
+                }
+                return type + ":" + provider.getName();
+            }
+            List<String> aliases = session.users().getFederatedIdentitiesStream(realm, user)
+                    .map(FederatedIdentityModel::getIdentityProvider).sorted().toList();
+            if (!aliases.isEmpty() && user.credentialManager().getStoredCredentialsByTypeStream("password").findAny().isEmpty()) {
+                return "brokered:" + aliases.get(0);
+            }
+            return "local";
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     private static final Pattern GENERALIZED_TIME =

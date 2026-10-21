@@ -4,7 +4,7 @@ This guide provides detailed instructions for installing and configuring the Hum
 
 ## Prerequisites
 
-- Keycloak 22.x, 23.x, or 24.x
+- Keycloak 26.8.1 (the version this connector is built and tested against)
 - Java 17 or later
 - Access to Keycloak server filesystem
 - Humifortis SaaS account
@@ -85,7 +85,7 @@ Add environment variables to your docker-compose.yml:
 ```yaml
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:23.0
+    image: quay.io/keycloak/keycloak:26.8.1
     environment:
       - HUMIFORTIS_API_URL=https://api.humifortis.educosmic.tech
       - HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
@@ -101,7 +101,7 @@ Or via command line:
 docker run -e HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6... \
   -e HUMIFORTIS_API_URL=https://api.humifortis.educosmic.tech \
   -v ./humifortis-keycloak-connector.jar:/opt/keycloak/providers/humifortis-keycloak-connector.jar \
-  quay.io/keycloak/keycloak:23.0 start
+  quay.io/keycloak/keycloak:26.8.1 start
 ```
 
 ### For Kubernetes
@@ -131,7 +131,7 @@ spec:
     spec:
       containers:
       - name: keycloak
-        image: quay.io/keycloak/keycloak:23.0
+        image: quay.io/keycloak/keycloak:26.8.1
         envFrom:
         - secretRef:
             name: humifortis-config
@@ -193,7 +193,10 @@ You should now see "humifortis-event-listener" in the enabled listeners list.
 3. After **Username Password Form**, add these two steps, both **REQUIRED**, in this order:
    - **Humifortis Device Collector** — gathers the browser's device signals
    - **Humifortis Risk Authenticator** — asks Humifortis for the decision
-4. Bind the new flow as the realm's **Browser flow** (Action → Bind flow)
+4. Add a sub-flow named `humifortis-mfa-subflow` to **Forms**, requirement **CONDITIONAL**, after the Risk Authenticator, and in it two steps, both **REQUIRED**, in this order:
+   - **Humifortis High Condition** — matches when Humifortis asks for a second factor
+   - **Humifortis Step-Up Router** — runs the factor: an email code, Keycloak's OTP form (authenticator app) or Keycloak's WebAuthn (passkey)
+5. Bind the new flow as the realm's **Browser flow** (Action → Bind flow)
 
 Your flow should look like this:
 
@@ -206,12 +209,69 @@ humifortis-browser
     ├── Username Password Form (REQUIRED)
     ├── Humifortis Device Collector (REQUIRED)      ← new
     ├── Humifortis Risk Authenticator (REQUIRED)    ← new
-    └── Browser - Conditional OTP (CONDITIONAL)
+    └── humifortis-mfa-subflow (CONDITIONAL)        ← new
+        ├── Humifortis High Condition (REQUIRED)
+        └── Humifortis Step-Up Router (REQUIRED)
 ```
+
+**The MFA sub-flow is what challenges.** When Humifortis asks for a step-up the Risk Authenticator lets the flow go on and
+this sub-flow runs the factor. Without it the person is signed in with no second factor; the connector then logs an
+error (`step-up ... decided but no second factor ran`) and reports the login with `divergence=step_up_not_executed`.
+The sub-flow needs no `OTP Form` step: the router runs Keycloak's own OTP form itself, and a user who has no
+authenticator app gets the email code. Enable *Webauthn Register* and *Configure OTP* in
+**Authentication → Required actions** to let people enroll a passkey or an authenticator app.
+
+**The factor is decided by Humifortis.** The step-up router challenges the `required_factor` of the decision (e-mail code,
+text message, authenticator app or passkey); its own `fallback.order` is used only when Humifortis could not be reached, and
+as the next choice when the required factor cannot be delivered (the difference is reported). Humifortis chooses from the
+factors the connector advertises: enrolled credentials, a verified e-mail, a number with a configured SMS gateway.
+
+**When Humifortis cannot be reached,** the tenant's fallback policy applies (cached from earlier answers). `allow` (the default
+for ordinary users) means your own flow runs exactly as if Humifortis were not installed. `step_up` challenges the person
+with the factor she already has (passkey, authenticator app), then e-mail or text; `deny` refuses. Each is reported, and a
+burst raises a SOC alert.
+
+**Session reuse (optional).** Enable *Humifortis session check* in **Authentication → Required actions** to have a sign-in that
+reuses an existing single-sign-on session evaluated. A deny or step-up ends that session and the person signs in again in full;
+in `dry_run` / `shadow` it is only reported.
+
+**Text-message codes (optional).** Set `HUMIFORTIS_SMS_GATEWAY_URL` (https, or http with `HUMIFORTIS_ALLOW_INSECURE_HTTP=true`) and
+optionally `HUMIFORTIS_SMS_GATEWAY_TOKEN` (bearer) on Keycloak. The connector posts `{"to":"+15145550100","message":"..."}`; any
+2xx is a delivery. The number is read from the user attribute `phoneNumber` (change with `HUMIFORTIS_SMS_PHONE_ATTRIBUTE`; declare it
+in **Realm settings → User profile**), in E.164. A person without a verified email but with a number is texted; without the URL
+the channel does not exist.
 
 That is all device collection needs: the collector script ships inside the connector jar and
 works with **any** login theme. After the password, the user sees a short page (well under a
 second) while the device signals are gathered.
+
+### Password grant (optional)
+
+A client that sends the username and password itself (the OAuth *password grant*, Keycloak's **Direct grant** flow) never
+reaches the Browser flow, so Humifortis does not see it. To evaluate it, open the realm's **Direct grant** flow and add
+**Humifortis Direct Grant Risk** (**REQUIRED**) after the password step. A deny, and any decision that asks for a second
+factor, then refuses the token with `401 {"error":"access_denied","error_description":"humifortis_risk"}` — no page exists in
+this flow to ask for the factor. With no answer from Humifortis the tenant's fallback policy decides (allow unless it says
+deny); in `dry_run` and `shadow` nothing is refused. Where a client does not need the password grant, switch *Direct access
+grants* off for it instead.
+
+### Refresh tokens (optional)
+
+A refresh-token request goes to the token endpoint, not through the Browser flow. To evaluate it, create a **client profile**
+holding the executor **humifortis-token-refresh-risk** and a **client policy** that applies the profile to the clients you
+want (*Realm settings → Client policies*). A deny, and any decision that asks for a second factor, then refuses the refresh
+(`400 {"error":"invalid_grant","error_description":"humifortis_risk"}`): the client sends the person through the browser
+flow again, where the decision is enforced with a page. With no answer from Humifortis the refresh goes on, unless the client
+has the attribute `humifortis.fallback=deny`; a client with `humifortis.enforcement=off` is never evaluated; in `dry_run`
+and `shadow` nothing is refused. Nothing changes for a realm that does not create the profile and the policy.
+
+### Token exchange (optional)
+
+A client that trades a person's token for another one (RFC 8693 *standard token exchange*) can be evaluated the same way as
+a refresh: put the executor **humifortis-token-exchange-risk** in a client profile and apply it with a client policy. A deny,
+and any decision that asks for a second factor, refuses the exchange (`access_denied` / `humifortis_risk`). Same fallback
+and opt-outs as for refresh tokens. The JWT authorization grant has no Keycloak hook for such a stage: switch it off unless
+you need it.
 
 ### Recommended: collect the device on the login page itself (one line)
 
@@ -378,8 +438,10 @@ tail -f /opt/keycloak/data/log/keycloak.log
 1. Verify RBA authenticator is in the Browser flow
 2. Check it's placed **after** Username Password Form
 3. Ensure Requirement is set to **REQUIRED** not DISABLED
-4. Check logs for decision query failures
-5. Verify policies are configured in SaaS
+4. Check the **MFA sub-flow** (Step 6) is in the Forms flow: without it a step-up decision is not carried out
+   (the Keycloak log shows `step-up ... decided but no second factor ran`)
+5. Check logs for decision query failures
+6. Verify policies are configured in SaaS
 
 ## Configuration Reference
 
@@ -451,12 +513,96 @@ Roles are **effective** roles: direct, inherited from groups, composites expande
 administrator through a group is seen as one. Groups are sent as paths. Both lists are bounded
 (100 entries, 4 KiB).
 
+### Directory federation (LDAP / Active Directory)
+
+Nothing to configure in the connector. With a directory federated under *User federation*, every event and decision says
+where the account comes from (`account_source`): `local`, `ldap:<provider name>`, `ad:<provider name>` (the provider's
+*Vendor* is Active Directory) or `brokered:<identity provider alias>`. The source is the account's origin, not proof of how
+this sign-in's password was checked. Humifortis shows it on the entity list and page, on alerts, in Reporting, and a decision
+rule can read it (`identity.account_source`).
+
+What the connector does for federated people:
+
+- **Account age** comes from the directory (`createTimestamp`, `whenCreated`, or `hf.account.createdAttributes`), not from
+  the import at the first sign-in: a ten-year-old employee is not a new account. Keycloak's default LDAP mappers already
+  include the creation date.
+- **A directory that does not answer is not a wrong password.** When Keycloak cannot reach the directory, a person it imported
+  before is reported as `directory_unavailable` (with the provider name) instead of a failed sign-in, and Humifortis opens one
+  operational alert per directory. A person never imported cannot be told apart and stays a failed sign-in.
+- **Privilege from directory groups**: map the directory's groups with a *group-ldap-mapper* and list the privileged group
+  paths in `hf.privileged.groups` (for example `/administrators`).
+
+- **A disabled account is not a wrong password.** Keycloak checks the password first and the enabled flag after it, so its
+  `user_disabled` error means the right password was used on a disabled account: the connector reports it as
+  `auth_account_disabled` (a leaver, or someone holding the credentials), never as a failed sign-in. A wrong password stays a
+  failed sign-in, disabled account or not.
+
+Recommended setting: *Cache policy* `NO_CACHE` on the federation, so a change in the directory (a person added to an
+administrators group, an attribute) is seen at the person's next sign-in. With Keycloak's default cache, an imported person's
+groups are refreshed only when the cache entry expires.
+
+**Active Directory.** Set *Vendor* to Active Directory and *Edit mode* to `WRITABLE`. Keycloak's AD account-control mapper
+acts on the domain's answer to a sign-in only in writable mode: an account disabled in the domain becomes Keycloak's
+`user_disabled` (reported as above), and a password that must change at next logon gets Keycloak's password-update page.
+In read-only mode both are refused as a wrong password, so they count as failed sign-ins and a person whose password expired
+can be blocked for retrying it. Changing the password from Keycloak needs LDAPS (AD accepts a new password only over an
+encrypted connection). For nested groups (a group inside *Domain Admins*), use a *group-ldap-mapper* with the retrieve strategy
+`LOAD_GROUPS_BY_MEMBER_ATTRIBUTE_RECURSIVELY`, its *LDAP Groups DN* on the container that holds the groups (for example
+`CN=Users,DC=corp,DC=example`; Keycloak does not search below it), a *Groups path* such as `/corp-ad`, and list
+`/corp-ad/Domain Admins` in `hf.privileged.groups`.
+
+### Brokered logins (an external identity provider)
+
+A person who signs in through an identity provider (*Identity providers*: another Keycloak, Entra ID, Okta, Google…)
+never sees the realm's password form, so the browser flow's Humifortis steps do not run and **nothing is decided**. Give
+each identity provider a *Post login flow* that runs them after the provider returned:
+
+1. *Authentication → Create flow* `humifortis-post-broker` (basic flow), with, in order:
+   - *Humifortis Device Collector*: Required;
+   - *Humifortis Risk Authenticator*: Required;
+   - a sub-flow (Conditional) holding *Humifortis High Condition* (Required) and *Humifortis Step-Up Router* (Required).
+2. *Identity providers → (your provider) → Post login flow*: `humifortis-post-broker`.
+
+The decision is then taken for every brokered sign-in, at the same moment as for a password: a step-up asks the factor
+Humifortis decided, a deny refuses the sign-in although the provider vouched for the person, and the decision names the
+provider (`identity_provider`) and the account source (`brokered:<alias>`). A session later reused by another application is
+judged by the session check like any session.
+
+When a provider fails (it does not answer, answers with an error or with something that is not a token), Keycloak shows its
+own error page and the person is not signed in. The connector reports it against the integration, not against anyone:
+Humifortis raises one alert per provider ("Identity provider `<alias>` fails — sign-ins through it are refused"), and nobody's
+risk or failed-password count changes. Keycloak's event carries no cause; it is in Keycloak's server log.
+
+For single logout, the provider must accept the realm's broker endpoint as a post-logout redirect
+(`https://<keycloak>/realms/<realm>/broker/<alias>/endpoint/*`); otherwise the provider's logout fails and the realm's
+session is not ended.
+
+### SAML applications
+
+A SAML application (a client of protocol *SAML* in the realm; Keycloak is its identity provider) signs its people in
+through the realm's browser flow, so Humifortis decides it exactly as it decides an OpenID Connect application: nothing to
+configure. A denied person receives **no assertion**; a step-up comes before it. The decision names the protocol
+(`auth_method`: `saml`) and the application (`client_id`). A SAML application that reuses a single-sign-on session is
+judged by the session check like any other. For single logout, the application must answer Keycloak's logout request with
+a logout response: Keycloak ends the session only once every SAML application has answered.
+
 ### WebAuthn (passkeys) as a step-up
 
 When a decision requires a phishing-resistant factor (`REQUIRE_WEBAUTHN`, e.g. a tenant access
 policy), the step-up router runs Keycloak's own WebAuthn ceremony for users with a passkey or
 security key, and falls back to an email code for users without one. No flow change is needed;
 enable *Webauthn Register* in *Authentication → Required actions* to let users enroll.
+
+**Kinds of credential.** A security key, a passkey kept in one device and a passkey synced through a cloud account are all
+WebAuthn. Keycloak does not keep the flag that tells a synced passkey from a device-bound one, so the connector reads it
+from what the browser posts: at the registration (now reported as an enrolment) and at each step-up. Humifortis
+remembers the kind of each credential and shows it on the person and in Reporting. Nothing to configure in Keycloak.
+
+A tenant that counts only security keys and device-bound passkeys as phishing-resistant sets, in its Humifortis
+configuration, `assurance.phishing_resistant: device_bound` (default `any`). A synced passkey then counts as an app-level
+factor: with `assurance.shortfall: best_available` the person is still stepped up with it and the shortfall is recorded;
+with `deny` she is refused. When a person holds both kinds, the decision asks for the stronger one, and the step-up refuses
+a synced passkey presented in its place ("This passkey cannot be used here"), recorded as a failed step-up.
 
 ### Monitored Events
 

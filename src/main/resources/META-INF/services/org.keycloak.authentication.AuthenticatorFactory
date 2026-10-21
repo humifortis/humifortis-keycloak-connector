@@ -6,3 +6,4 @@ tech.humifortis.keycloak.auth.ContextConditionFactory$RiskLevel
 tech.humifortis.keycloak.auth.ContextConditionFactory$RuleFired
 tech.humifortis.keycloak.auth.ContextConditionFactory$Attribute
 tech.humifortis.keycloak.auth.HumifortisDecisionReportFactory
+tech.humifortis.keycloak.auth.HumifortisDirectGrantAuthenticatorFactory

@@ -86,4 +86,35 @@ class HumifortisRiskAuthenticatorTest {
         assertEquals("DENY", HumifortisRiskAuthenticator.fallbackAction(FallbackPolicy.Outcome.DENY, java.util.List.of("TOTP")));
         assertEquals("ALLOW", HumifortisRiskAuthenticator.fallbackAction(FallbackPolicy.Outcome.ALLOW, java.util.List.of()));
     }
+
+    // ── appliedAction ────────────────────────────────────────────
+
+    private static HumifortisRiskEvaluator.EvaluateResponse answer(String action, String enforced) {
+        HumifortisRiskEvaluator.EvaluateResponse d = new HumifortisRiskEvaluator.EvaluateResponse();
+        d.action = action;
+        d.enforced_action = enforced;
+        return d;
+    }
+
+    @Test
+    void appliedAction_isTheFactorResolvedAgainstThePersonsMethods() {
+        // a passkey required of a person who has only an authenticator app: Humifortis resolves it to TOTP
+        assertEquals("REQUIRE_TOTP", HumifortisRiskAuthenticator.appliedAction(answer("REQUIRE_WEBAUTHN", "REQUIRE_TOTP"), "REQUIRE_WEBAUTHN"));
+    }
+
+    @Test
+    void appliedAction_aDenyForAPersonWithNoFactorAtAllIsEnforced() {
+        assertEquals("DENY", HumifortisRiskAuthenticator.appliedAction(answer("REQUIRE_WEBAUTHN", "DENY"), "REQUIRE_WEBAUTHN"));
+    }
+
+    @Test
+    void appliedAction_withoutAnEnforcedActionTheRequestedOneStands() {
+        assertEquals("REQUIRE_MFA", HumifortisRiskAuthenticator.appliedAction(answer("REQUIRE_MFA", ""), "REQUIRE_MFA"));
+        assertEquals("REQUIRE_MFA", HumifortisRiskAuthenticator.appliedAction(answer("REQUIRE_MFA", null), "REQUIRE_MFA"));
+    }
+
+    @Test
+    void appliedAction_noAnswerIsTheFallbackAction() {
+        assertEquals("ALLOW", HumifortisRiskAuthenticator.appliedAction(null, "ALLOW"));
+    }
 }

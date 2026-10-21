@@ -43,6 +43,16 @@ public final class DecisionReport {
         return ALLOW;
     }
 
+    /**
+     * True when a token stage (password grant, refresh, token exchange) must refuse: a deny, or a step-up — no page exists
+     * there to ask for the factor, and a token must not be issued without it. Never in dry_run / shadow.
+     */
+    public static boolean refusesToken(String appliedAction, String mode) {
+        if (!applied(mode)) return false;
+        String outcome = outcomeOf(appliedAction);
+        return DENY.equals(outcome) || STEP_UP.equals(outcome);
+    }
+
     /** Only {@code enforce} applies the decision; {@code dry_run} and {@code shadow} let the person in. */
     public static boolean applied(String mode) {
         return "enforce".equals(mode);

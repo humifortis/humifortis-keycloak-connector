@@ -2,7 +2,7 @@
 
 **Version:** 1.0.0  
 **License:** Apache 2.0  
-**Supported Keycloak Versions:** 22.x, 23.x, 24.x  
+**Built for Keycloak:** 26.8.1  
 **Java Version:** 17+
 
 A thin client connector that integrates Keycloak with the Humifortis SaaS platform for centralized risk-based authentication (RBA) and security event monitoring.
