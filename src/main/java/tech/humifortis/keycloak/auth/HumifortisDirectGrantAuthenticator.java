@@ -80,6 +80,10 @@ public class HumifortisDirectGrantAuthenticator implements Authenticator {
         if (refuse) {
             context.failure(AuthenticationFlowError.ACCESS_DENIED, refusal());
         } else {
+            // the session this grant opens is issued in the epoch of the person's risk (P23)
+            if (d != null && d.risk_epoch > 0) {
+                context.getAuthenticationSession().setUserSessionNote(tech.humifortis.keycloak.token.RiskEpoch.NOTE, String.valueOf(d.risk_epoch));
+            }
             context.success();
         }
     }

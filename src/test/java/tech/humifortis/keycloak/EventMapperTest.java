@@ -218,6 +218,25 @@ class EventMapperTest {
     }
 
     @Test
+    void aTokenRequestThatProvedAKeyCarriesItsThumbprint() {
+        Event event = buildEvent(UUID.randomUUID().toString(), EventType.CLIENT_LOGIN);
+        event.setClientId("agent-planner");
+        event.getDetails().put("dpop_jkt", "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I");
+
+        HumifortisEvent result = mapper.fromKeycloakEvent(event);
+
+        assertEquals("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I", result.getMetadata().get("dpop_jkt"));
+        assertEquals(true, result.getMetadata().get("dpop_bound"));
+    }
+
+    @Test
+    void aTokenRequestWithoutAProofCarriesNeitherKeyNorFlag() {
+        HumifortisEvent result = mapper.fromKeycloakEvent(buildEvent(UUID.randomUUID().toString(), EventType.CLIENT_LOGIN));
+        assertEquals(false, result.getMetadata().containsKey("dpop_jkt"));
+        assertEquals(false, result.getMetadata().containsKey("dpop_bound"));
+    }
+
+    @Test
     void loginError_userDisabled_isASignInToADisabledAccount_notAFailedPassword() {
         Event disabled = buildEvent(UUID.randomUUID().toString(), EventType.LOGIN_ERROR);
         disabled.setError("user_disabled");

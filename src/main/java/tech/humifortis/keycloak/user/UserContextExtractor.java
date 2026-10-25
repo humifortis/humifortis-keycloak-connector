@@ -93,7 +93,7 @@ public class UserContextExtractor {
                 mfaMethods,
                 roles.values(), roles.truncated(),
                 groups.values(), groups.truncated(),
-                !mfaMethods.isEmpty(),
+                hasSecondFactor(mfaMethods),
                 privilegedReason != null,
                 privilegedReason,
                 createdAt[0], createdSource,
@@ -110,14 +110,24 @@ public class UserContextExtractor {
                     case "otp" -> "TOTP";
                     case "webauthn" -> "WEBAUTHN";
                     case "webauthn-passwordless" -> "WEBAUTHN_PASSWORDLESS";
+                    // recovery codes are a factor the person can use (the weakest), listed so the step-up can ask for one
+                    case "recovery-authn-codes" -> RECOVERY_CODE;
                     default -> null;
                 })
                 .filter(java.util.Objects::nonNull)
                 .toList();
     }
 
+    /** The method name of a one-time recovery code. */
+    public static final String RECOVERY_CODE = "RECOVERY_CODE";
+
+    /** A person is enrolled in a second factor when she has one besides recovery codes: codes on paper protect no sign-in by themselves. */
+    static boolean hasSecondFactor(List<String> methods) {
+        return methods.stream().anyMatch(m -> !RECOVERY_CODE.equals(m));
+    }
+
     public boolean hasMfaEnrolled(UserModel user) {
-        return !extractMfaMethods(user).isEmpty();
+        return hasSecondFactor(extractMfaMethods(user));
     }
 
     public boolean hasPrivilegedRole(UserModel user) {

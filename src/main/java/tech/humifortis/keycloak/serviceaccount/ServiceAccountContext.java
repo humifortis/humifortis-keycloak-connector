@@ -42,6 +42,10 @@ public final class ServiceAccountContext {
     public static final String ATTR_WINDOW_END_HOUR = "humifortis.expected_window_end_hour_utc";
     public static final String ATTR_ROTATION_MAX_AGE_DAYS = "humifortis.rotation_max_age_days";
     public static final String ATTR_OWNER = "humifortis.owner";
+    /** The audiences the client is known to exchange its token for (space or comma separated); see {@link #resolveExchange}. */
+    public static final String ATTR_BASELINE_AUDIENCES = "humifortis.baseline_audiences";
+    /** An audience travels as a scope with this prefix, so the one scope-escalation judgement covers both (MA-2). */
+    public static final String AUDIENCE_PREFIX = "aud:";
     /** Keycloak's own attribute: epoch seconds of the creation (or last rotation) of the client secret. */
     public static final String ATTR_SECRET_CREATED = "client.secret.creation.time";
 
@@ -53,6 +57,10 @@ public final class ServiceAccountContext {
     public static final String KEY_CREDENTIAL_AGE_DAYS = "service_account.credential_age_days";
     public static final String KEY_ROTATION_MAX_AGE_DAYS = "service_account.rotation_max_age_days";
     public static final String KEY_OWNER = "service_account.owner";
+    /** Days since the secret was rotated (regenerated after the client was created); absent when it never was. Not part of KEYS: it needs the service-account user, so the callers add it. */
+    public static final String KEY_SECRET_ROTATION_AGE_DAYS = "service_account.secret_rotation_age_days";
+    /** A secret created less than this long after the client is the secret the client was created with, not a rotation. */
+    static final long ROTATION_MARGIN_SECONDS = 30;
     static final int MAX_OWNER_CHARS = 255;
 
     /** Every key {@link #resolve} may produce: the ones the event mapper forwards. */
@@ -110,6 +118,65 @@ public final class ServiceAccountContext {
         if (owner != null && !owner.isBlank()) {
             String trimmed = owner.trim();
             out.put(KEY_OWNER, trimmed.length() > MAX_OWNER_CHARS ? trimmed.substring(0, MAX_OWNER_CHARS) : trimmed);
+        }
+        return out;
+    }
+
+    /**
+     * Days since the secret was rotated: the secret of a client is rotated when it was created more than an hour after the
+     * client itself (Keycloak creates the service-account user with the client, so its creation time is the client's).
+     * Null when the secret never was rotated, or when either time is unknown: nothing is guessed.
+     *
+     * @param clientAttributes      the client's attributes
+     * @param clientCreatedMillis   when the client was created (its service-account user's creation time), or null
+     */
+    public static String secretRotationAgeDays(Map<String, String> clientAttributes, Long clientCreatedMillis, Instant now) {
+        if (clientAttributes == null || clientCreatedMillis == null || now == null) return null;
+        String raw = clientAttributes.get(ATTR_SECRET_CREATED);
+        if (raw == null || raw.isBlank()) return null;
+        try {
+            Instant secretCreated = Instant.ofEpochSecond(Long.parseLong(raw.trim()));
+            Instant clientCreated = Instant.ofEpochMilli(clientCreatedMillis);
+            if (Duration.between(clientCreated, secretCreated).getSeconds() < ROTATION_MARGIN_SECONDS) return null;
+            return Long.toString(Math.max(0L, Duration.between(secretCreated, now).toDays()));
+        } catch (NumberFormatException | java.time.DateTimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The context of a token EXCHANGE by a service account (MA-2): the same expectations as a token request, and the audience
+     * the token is exchanged for judged like a scope. The audience is an {@code aud:<name>} entry of the requested scopes; the
+     * audiences the operator declared ({@code humifortis.baseline_audiences}) are entries of the baseline. Scopes are judged
+     * only when a scope baseline is declared, audiences only when an audience baseline is: a baseline never declared is not
+     * guessed (the detector then reports the input as unavailable).
+     *
+     * @param requestedScopes the {@code scope} of the exchange (space separated), may be null
+     * @param audiences       the {@code audience} of the exchange (space or comma separated), may be null
+     */
+    public static Map<String, String> resolveExchange(Map<String, String> clientAttributes, String sourceIp,
+                                                      String requestedScopes, String audiences, Instant now) {
+        Map<String, String> out = resolve(clientAttributes, sourceIp, null, now);
+        out.remove(KEY_REQUESTED_SCOPES);
+        out.remove(KEY_HISTORICAL_SCOPES);
+        Map<String, String> attrs = clientAttributes != null ? clientAttributes : Map.of();
+        Set<String> requested = new TreeSet<>();
+        Set<String> baseline = new TreeSet<>();
+        String baselineScopes = joinScopes(attrs.get(ATTR_BASELINE_SCOPES));
+        if (baselineScopes != null) {
+            baseline.addAll(java.util.Arrays.asList(baselineScopes.split(",")));
+            String asked = joinScopes(requestedScopes);
+            if (asked != null) requested.addAll(java.util.Arrays.asList(asked.split(",")));
+        }
+        String baselineAudiences = joinScopes(attrs.get(ATTR_BASELINE_AUDIENCES));
+        if (baselineAudiences != null) {
+            for (String a : baselineAudiences.split(",")) baseline.add(AUDIENCE_PREFIX + a);
+            String asked = joinScopes(audiences);
+            if (asked != null) for (String a : asked.split(",")) requested.add(AUDIENCE_PREFIX + a);
+        }
+        if (!baseline.isEmpty() && !requested.isEmpty()) {
+            out.put(KEY_REQUESTED_SCOPES, String.join(",", requested));
+            out.put(KEY_HISTORICAL_SCOPES, String.join(",", baseline));
         }
         return out;
     }

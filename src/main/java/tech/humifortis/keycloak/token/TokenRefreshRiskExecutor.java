@@ -20,6 +20,8 @@ import org.keycloak.services.clientpolicy.executor.ClientPolicyExecutorProvider;
 public class TokenRefreshRiskExecutor implements ClientPolicyExecutorProvider<ClientPolicyExecutorConfigurationRepresentation> {
 
     public static final String DECISION_STAGE = "token_refresh";
+    /** The event the stage's evaluation is: a refresh, judged by the rules of a sign-in on the network and by its own on the token. */
+    public static final String EVENT_TYPE = "auth_token_refresh";
 
     private final KeycloakSession session;
 
@@ -46,7 +48,21 @@ public class TokenRefreshRiskExecutor implements ClientPolicyExecutorProvider<Cl
         } catch (RuntimeException e) {
             return; // an unreadable token is Keycloak's to refuse
         }
-        TokenRiskStage.Verdict verdict = TokenRiskStage.evaluate(session, DECISION_STAGE, user, refreshToken.getSessionId());
+        // a service account that holds a refresh token (a client configured to receive one) is decided as the machine it is (MA-6)
+        var realm = session.getContext().getRealm();
+        if (user != null && user.getServiceAccountClientLink() != null) {
+            var machine = realm.getClientById(user.getServiceAccountClientLink());
+            if (machine != null) new tech.humifortis.keycloak.serviceaccount.ServiceAccountRiskExecutor(session).executeRefresh(machine, refreshToken.getSessionId());
+            return;
+        }
+        // a refresh is judged as its own touch: how long the token lay unused, and from where. A confidential client refreshes
+        // from its own server, so the request's address is not the person's and is not sent.
+        var client = session.getContext().getClient();
+        boolean publicClient = client != null && client.isPublicClient();
+        var facts = RefreshTokens.contextOf(System.currentTimeMillis() / 1000L, refreshToken.getIat(), refreshToken.getAuth_time(),
+                RefreshTokens.isOffline(refreshToken), publicClient);
+        TokenRiskStage.Verdict verdict = TokenRiskStage.evaluate(session, DECISION_STAGE, user, refreshToken.getSessionId(), EVENT_TYPE,
+                new tech.humifortis.keycloak.auth.StageContext(facts, publicClient, refreshToken.getSessionId()));
         if (verdict != null && verdict.refuse()) {
             throw new ClientPolicyException("invalid_grant", TokenRiskStage.DENY_DESCRIPTION);
         }

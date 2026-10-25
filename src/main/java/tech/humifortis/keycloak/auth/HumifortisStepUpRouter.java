@@ -69,7 +69,7 @@ public class HumifortisStepUpRouter implements Authenticator {
 
     // ── MFA method enum ───────────────────────────────────────────────────────
     enum MfaMethod {
-        TOTP, EMAIL_OTP, WEBAUTHN, SMS_OTP;
+        TOTP, EMAIL_OTP, WEBAUTHN, SMS_OTP, RECOVERY_CODE;
 
         static MfaMethod fromString(String s) {
             if (s == null) return EMAIL_OTP;
@@ -156,6 +156,7 @@ public class HumifortisStepUpRouter implements Authenticator {
             switch (method) {
                 case TOTP     -> challengeTotp(context, cfg, correlationId);
                 case WEBAUTHN -> challengeWebAuthn(context, cfg, correlationId);
+                case RECOVERY_CODE -> challengeRecoveryCode(context, cfg, correlationId);
                 case EMAIL_OTP -> {
                     if (!canSendEmail(context.getUser())) {
                         // no verified email to write to: the text is the factor she can receive, if she has one
@@ -215,7 +216,10 @@ public class HumifortisStepUpRouter implements Authenticator {
                     webAuthn(context).action(context);
                 }
                 case EMAIL_OTP, SMS_OTP -> validateCodeOtp(context);
+                case RECOVERY_CODE -> recoveryCodes(context).action(context);   // Keycloak validates and consumes the code
             }
+            // the factor that completed is the level of the token's acr (P13)
+            AssuranceLevel.recordIfSucceeded(context);
         } catch (Exception e) {
             logger.errorf("[StepUpRouter] Validation error: %s", e.getMessage());
             denyWithCode(context, HumifortisError.MFA_CHALLENGE_FAILED,
@@ -315,6 +319,8 @@ public class HumifortisStepUpRouter implements Authenticator {
                                                  || "webauthn-passwordless".equals(c.getType()));
                 case EMAIL_OTP -> canSendEmail(user);
                 case SMS_OTP -> canText(user);
+                case RECOVERY_CODE -> user.credentialManager().getStoredCredentialsStream()
+                                     .anyMatch(c -> "recovery-authn-codes".equals(c.getType()));
             };
         } catch (Exception e) {
             logger.warnf("[StepUpRouter] Enrollment check for %s failed: %s", method, e.getMessage());
@@ -363,6 +369,26 @@ public class HumifortisStepUpRouter implements Authenticator {
     // WEBAUTHN — Keycloak's own WebAuthn ceremony (passkey / security key); a user
     // without one degrades to EMAIL_OTP
     // =========================================================================
+
+    // =========================================================================
+    // RECOVERY_CODE — Keycloak's own recovery-codes form (one use per code); a user without codes degrades to EMAIL_OTP
+    // =========================================================================
+
+    /** Keycloak's recovery-codes authenticator, run inside this step (no realm-flow change needed). */
+    org.keycloak.authentication.Authenticator recoveryCodes(AuthenticationFlowContext context) {
+        return new org.keycloak.authentication.authenticators.browser.RecoveryAuthnCodesFormAuthenticator(context.getSession());
+    }
+
+    private void challengeRecoveryCode(AuthenticationFlowContext context, AuthenticatorConfigModel cfg, String correlationId) {
+        if (isEnrolled(context.getUser(), MfaMethod.RECOVERY_CODE)) {
+            logger.infof("[StepUpRouter] RECOVERY_CODE challenge user=%s", context.getUser().getUsername());
+            HumifortisAuditLog.log("recovery_code_challenge", context.getUser().getId(), "RECOVERY_CODE", "initiated", "", correlationId, "");
+            recoveryCodes(context).authenticate(context);
+            return;
+        }
+        HumifortisAuditLog.log("recovery_code_degraded", context.getUser().getId(), "RECOVERY_CODE->EMAIL_OTP", "degraded", "", correlationId, "not_enrolled");
+        degradeToEmailOtp(context, cfg, "recovery code fallback: email not verified");
+    }
 
     /** Keycloak's WebAuthn authenticator, run inside this step (no realm-flow change needed). */
     org.keycloak.authentication.Authenticator webAuthn(AuthenticationFlowContext context) {
@@ -831,7 +857,14 @@ public class HumifortisStepUpRouter implements Authenticator {
             // Keycloak 26.x (Quarkus/RESTEasy) exposes org.keycloak.http.HttpResponse
             // which supports addHeader() but not a type-safe addCookie() variant.
             // We build the Set-Cookie header string directly — fully portable.
-            String cookiePath = "/realms/" + context.getRealm().getName();
+            // the realm as the browser addresses it: behind a frontend URL with a prefix it is /auth/realms/<realm>
+            String frontendBase = null;
+            try {
+                frontendBase = context.getSession().getContext().getUri(org.keycloak.urls.UrlType.FRONTEND).getBaseUri().getPath();
+            } catch (RuntimeException e) {
+                logger.debugf("[StepUpRouter] frontend base path unavailable: %s", e.getMessage());
+            }
+            String cookiePath = TrustCookie.path(frontendBase, context.getRealm().getName());
             int    maxAgeSec  = 30 * 24 * 3600; // 30 days
             String setCookieValue = "hf_trust=" + tokenValue
                     + "; Path=" + cookiePath

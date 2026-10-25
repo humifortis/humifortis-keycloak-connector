@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The key a token request proved with DPoP is reported**: a sign-in, client login, refresh, token exchange or device grant that
+  succeeded with a DPoP proof (RFC 9449) carries the RFC 7638 thumbprint of the key Keycloak accepted (`dpop_jkt`) and
+  `dpop_bound=true`. The connector reads the key from the header of the proof Keycloak has just validated; it never validates a
+  proof itself, and a header it cannot read reports nothing. A refused proof is still `auth_token_binding_failed`.
 - **A failed sign-in through an external identity provider is reported against the integration**: Keycloak's
   `IDENTITY_PROVIDER_LOGIN_ERROR` (which has no user, no provider and no cause) becomes the event
   `identity_provider_login_failed` of `integration:keycloak`, naming the provider (read from the broker callback the listener

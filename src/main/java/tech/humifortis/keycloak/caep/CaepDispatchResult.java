@@ -1,10 +1,22 @@
 package tech.humifortis.keycloak.caep;
 
+import java.util.Map;
+
 public record CaepDispatchResult(
         String processingResult,
         String action,
-        String error
+        String error,
+        Map<String, Object> detail
 ) {
+    public CaepDispatchResult(String processingResult, String action, String error) {
+        this(processingResult, action, error, null);
+    }
+
+    /** A processed event that reports what it did (a recovery lists the credentials it removed). */
+    public static CaepDispatchResult success(String action, Map<String, Object> detail) {
+        return new CaepDispatchResult("processed", action, "", detail);
+    }
+
     public static CaepDispatchResult success(String action) {
         return new CaepDispatchResult("processed", action, "");
     }

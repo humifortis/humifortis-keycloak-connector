@@ -71,7 +71,10 @@ public final class SmsGateway {
     /** Whether this person can be texted: a gateway is configured and she has a usable number. */
     public static boolean canText(UserModel user) {
         Map<String, String> env = System.getenv();
-        return url(env) != null && phoneOf(user, env) != null;
+        if (url(env) == null) return false;
+        String phone = phoneOf(user, env);
+        // a number that changed hands recently, or that was never verified, is not texted (P15)
+        return phone != null && tech.humifortis.keycloak.external.ExternalSignals.shared().mayText(user, phone);
     }
 
     /** The number as shown to the person and logged: the country code and the last two digits only. */

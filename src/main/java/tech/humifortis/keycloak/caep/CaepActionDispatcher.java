@@ -1,5 +1,6 @@
 package tech.humifortis.keycloak.caep;
 
+import org.keycloak.credential.CredentialModel;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -11,10 +12,12 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import tech.humifortis.keycloak.serviceaccount.ClientContainment;
+import tech.humifortis.keycloak.serviceaccount.ServiceAccountContext;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class CaepActionDispatcher {
@@ -32,6 +35,7 @@ public class CaepActionDispatcher {
             case CaepEventRegistry.ACCOUNT_DISABLED -> handleAccountDisabled(set, config, realm);
             case CaepEventRegistry.CREDENTIAL_COMPROMISE -> handleCredentialCompromise(set, config, realm);
             case CaepEventRegistry.THROTTLE -> handleThrottle(set, realm);
+            case CaepEventRegistry.ACCOUNT_RECOVERY -> handleAccountRecovery(set, config, realm);
             default -> CaepDispatchResult.noAction("unsupported event");
         };
     }
@@ -169,6 +173,90 @@ public class CaepActionDispatcher {
             if (CaepEventRegistry.THROTTLE.equals(registry.resolve(entry.getKey())) && entry.getValue().isJsonObject()) {
                 return entry.getValue().getAsJsonObject();
             }
+        }
+        return null;
+    }
+
+
+    /**
+     * Recovery after a compromise (P25): end the sessions and tokens, remove the second factors the request selects and the
+     * recovery codes, require a fresh enrolment of what was removed. For a service account's client: rotate its secret,
+     * disable it until the operator re-enables it, end the tokens it holds. Opt-in per realm
+     * ({@code hf.caep.enforce.accountRecovery}); what was done comes back to Humifortis in the reply's detail.
+     */
+    private CaepDispatchResult handleAccountRecovery(CaepParsedSet set, CaepConfig config, RealmModel realm) {
+        if (!config.enforceAccountRecovery()) return CaepDispatchResult.noAction("account recovery enforcement disabled (hf.caep.enforce.accountRecovery)");
+        AccountRecovery.Request req = AccountRecovery.parse(eventBody(set, CaepEventRegistry.ACCOUNT_RECOVERY));
+        if (req == null) return CaepDispatchResult.noAction("malformed account-recovery event");
+        if (AccountRecovery.isServiceAccount(set.subject())) return recoverClient(set.subject(), realm);
+        try {
+            UserModel user = targetUser(set, realm);
+            if (user == null) return CaepDispatchResult.noAction("target user not found");
+            List<CredentialModel> selected = AccountRecovery.select(user.credentialManager().getStoredCredentialsStream().collect(Collectors.toList()), req);
+            List<AccountRecovery.Removed> removed = new java.util.ArrayList<>();
+            Set<String> required = new java.util.LinkedHashSet<>();
+            for (CredentialModel c : selected) {
+                removed.add(AccountRecovery.describe(c));
+                user.credentialManager().removeStoredCredentialById(c.getId());
+                String action = AccountRecovery.requiredActionFor(c.getType());
+                if (action != null) required.add(action);
+            }
+            // a text-message number has no creation time: it goes only when every factor goes
+            if (AccountRecovery.SCOPE_ALL.equals(req.scope())) user.removeAttribute(AccountRecovery.smsAttribute(System.getenv()));
+            required.forEach(user::addRequiredAction);
+            int ended = 0;
+            if (req.endSessions()) ended = endEverything(user, realm);
+            return CaepDispatchResult.success("account_recovery", AccountRecovery.detail(removed, ended, required, null));
+        } catch (Exception e) {
+            return CaepDispatchResult.failed("account_recovery", messageOf(e));
+        }
+    }
+
+    /** Sessions, offline sessions and every token issued so far (the user's not-before moves to now). */
+    private int endEverything(UserModel user, RealmModel realm) {
+        List<UserSessionModel> sessions = session.sessions().getUserSessionsStream(realm, user).collect(Collectors.toList());
+        sessions.forEach(s -> session.sessions().removeUserSession(realm, s));
+        int n = sessions.size();
+        try {
+            List<UserSessionModel> offline = session.sessions().getOfflineUserSessionsStream(realm, user).collect(Collectors.toList());
+            offline.forEach(s -> session.sessions().removeOfflineUserSession(realm, s));
+            n += offline.size();
+        } catch (RuntimeException e) {
+            // no offline sessions to read: the not-before below still invalidates the tokens
+        }
+        session.users().setNotBeforeForUser(realm, user, (int) Instant.now().getEpochSecond());
+        return n;
+    }
+
+    /** RC-8: the service-account form. The secret is rotated, the client disabled (when it allows it), its tokens ended. */
+    private CaepDispatchResult recoverClient(String subject, RealmModel realm) {
+        String[] parts = subject.substring(SERVICE_ACCOUNT_SUBJECT.length()).split(":", 2);
+        if (parts.length != 2 || parts[1].isBlank()) return CaepDispatchResult.noAction("malformed service-account subject");
+        if (!parts[0].equals(realm.getId()) && !parts[0].equals(realm.getName())) return CaepDispatchResult.noAction("the client belongs to another realm");
+        try {
+            ClientModel client = realm.getClientByClientId(parts[1]);
+            if (client == null) return CaepDispatchResult.noAction("target client not found");
+            if (!ClientContainment.allowsDisable(client)) {
+                return CaepDispatchResult.noAction("the client does not allow it (" + ClientContainment.ATTR_ALLOW_DISABLE + ")");
+            }
+            client.setSecret(org.keycloak.models.utils.KeycloakModelUtils.generateSecret(client));
+            client.setAttribute(ServiceAccountContext.ATTR_SECRET_CREATED, String.valueOf(Instant.now().getEpochSecond()));
+            ClientContainment.disable(client, "analyst");
+            int ended = 0;
+            UserModel serviceUser = session.users().getServiceAccount(client);
+            if (serviceUser != null) ended = endEverything(serviceUser, realm);
+            return CaepDispatchResult.success("client_recovered", AccountRecovery.detail(List.of(), ended, Set.of(), client.getClientId() + ": secret rotated, client disabled"));
+        } catch (Exception e) {
+            return CaepDispatchResult.failed("client_recovered", messageOf(e));
+        }
+    }
+
+    /** The body of one event inside the SET's {@code events} claim. */
+    private static JsonObject eventBody(CaepParsedSet set, String event) {
+        if (set.events() == null) return null;
+        CaepEventRegistry registry = new CaepEventRegistry();
+        for (Map.Entry<String, JsonElement> entry : set.events().entrySet()) {
+            if (event.equals(registry.resolve(entry.getKey())) && entry.getValue().isJsonObject()) return entry.getValue().getAsJsonObject();
         }
         return null;
     }

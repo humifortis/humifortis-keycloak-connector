@@ -146,8 +146,17 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         // Step 3 — store in auth session for downstream conditions
         context.getAuthenticationSession().setAuthNote(NOTE_RISK_LEVEL,  riskLevel);
         context.getAuthenticationSession().setAuthNote(NOTE_RISK_ACTION, applied);
+        // the session this sign-in creates is issued in the epoch of the person's risk (P23)
+        if (serverDecision != null && serverDecision.risk_epoch > 0) {
+            context.getAuthenticationSession().setUserSessionNote(tech.humifortis.keycloak.token.RiskEpoch.NOTE, String.valueOf(serverDecision.risk_epoch));
+        }
         if (serverDecision != null && notBlank(serverDecision.required_factor)) {
             context.getAuthenticationSession().setAuthNote(NOTE_REQUIRED_FACTOR, serverDecision.required_factor);
+        }
+        if (serverDecision != null && serverDecision.achieved_assurance > 0) {
+            context.getAuthenticationSession().setAuthNote(AssuranceLevel.NOTE_ACHIEVED_LEVEL, String.valueOf(serverDecision.achieved_assurance));
+        } else {
+            context.getAuthenticationSession().removeAuthNote(AssuranceLevel.NOTE_ACHIEVED_LEVEL);
         }
         if (serverDecision != null && notBlank(serverDecision.required_factor_kind)) {
             context.getAuthenticationSession().setAuthNote(NOTE_REQUIRED_FACTOR_KIND, serverDecision.required_factor_kind);
@@ -290,6 +299,8 @@ public class HumifortisRiskAuthenticator implements Authenticator {
             case "DENY" -> {
                 logger.warnf("[HumifortisRiskAuthenticator] DENY — %s", risk.getReason().orElse(""));
                 executeSideActions(context, "DENY", actions, serverDecision);
+                // the approval of a device (RFC 8628): the device is told, not left waiting for a code that will never be approved
+                DeviceGrant.denyDevice(context);
                 // a fallback denial says "unavailable", never "suspicious": nothing was evaluated
                 HumifortisError err = serverDecision == null ? HumifortisError.SERVICE_TIMEOUT : HumifortisError.ACCESS_DENIED_RISK;
                 context.failure(AuthenticationFlowError.ACCESS_DENIED,
@@ -655,6 +666,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                 extra.put("required_factor", d.required_factor);
                 // the weakest kind of WebAuthn credential the step-up accepts, and the assurance it reaches
                 extra.put("required_factor_kind", d.required_factor_kind);
+                if (d.required_assurance > 0) extra.put("required_assurance", String.valueOf(d.required_assurance));
                 if (d.achieved_assurance > 0) extra.put("achieved_assurance", String.valueOf(d.achieved_assurance));
                 if (d.assurance_shortfall) extra.put("assurance_shortfall", "true");
                 if (d.derived_signals != null && !d.derived_signals.isEmpty()) extra.put("derived_signals", String.join(",", d.derived_signals));

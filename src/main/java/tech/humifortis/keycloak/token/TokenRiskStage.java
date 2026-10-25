@@ -41,6 +41,29 @@ public final class TokenRiskStage {
      * Reports the decision. Never throws: a fault of the stage never refuses a request.
      */
     static Verdict evaluate(KeycloakSession session, String stage, UserModel user, String flowId) {
+        return evaluate(session, stage, user, flowId, null);
+    }
+
+    /** As above; {@code more} is added to the decision report (a machine acting for the person names itself, MA-3). */
+    static Verdict evaluate(KeycloakSession session, String stage, UserModel user, String flowId, Map<String, String> more) {
+        return evaluate(session, stage, user, flowId, null, null, more);
+    }
+
+    /** The key under which the stage tells the listener that it evaluated this request (core then has one evaluation, not two). */
+    public static final String SESSION_ATTR_EVALUATED = "hf.token.evaluated";
+
+    /**
+     * As above, for a touch that is its own kind of event ({@code eventType}, for example a refresh) with facts of its own
+     * ({@code context}); both null judge it as the exchange is judged. The epoch the artefact was issued in is read from the
+     * session it belongs to and the epoch of this decision is noted on it when the touch is let through.
+     */
+    static Verdict evaluate(KeycloakSession session, String stage, UserModel user, String flowId, String eventType,
+                            tech.humifortis.keycloak.auth.StageContext context) {
+        return evaluate(session, stage, user, flowId, eventType, context, null);
+    }
+
+    private static Verdict evaluate(KeycloakSession session, String stage, UserModel user, String flowId, String eventType,
+                                    tech.humifortis.keycloak.auth.StageContext context, Map<String, String> more) {
         try {
             RealmModel realm = session.getContext().getRealm();
             ClientModel client = session.getContext().getClient();
@@ -49,18 +72,33 @@ public final class TokenRiskStage {
             SaasConfig config = SaasConfig.fromEnv();
             if (!config.hasApiKey()) return null; // not configured: nothing changes
 
-            HumifortisRiskEvaluator.EvaluateResponse d = new HumifortisRiskEvaluator(session).decisionFor(realm, user, flowId);
+            org.keycloak.models.UserSessionModel userSession = userSessionOf(session, realm, flowId);
+            Long issuedIn = RiskEpoch.of(userSession);
+            if (issuedIn != null) {
+                java.util.Map<String, String> extra = new LinkedHashMap<>(context != null && context.extra() != null ? context.extra() : Map.of());
+                extra.put(RiskEpoch.METADATA_KEY, String.valueOf(issuedIn));
+                context = new tech.humifortis.keycloak.auth.StageContext(extra, context == null || context.personNetwork(),
+                        context != null ? context.currentSessionId() : null);
+            }
+            session.setAttribute(SESSION_ATTR_EVALUATED, Boolean.TRUE);
+            HumifortisRiskEvaluator evaluator = new HumifortisRiskEvaluator(session);
+            HumifortisRiskEvaluator.EvaluateResponse d = eventType == null
+                    ? evaluator.decisionFor(realm, user, flowId)
+                    : evaluator.decisionFor(realm, user, flowId, eventType, context);
             Verdict v = decide(d, attr(client, ServiceAccountRiskExecutor.ATTR_FALLBACK));
 
             Map<String, String> extra = new LinkedHashMap<>();
             extra.put("username", user.getUsername());
             extra.put("client_id", client.getClientId());
             extra.put("decision_stage", stage);
+            if (more != null) extra.putAll(more);
             if (d != null) {
                 extra.put("risk_level", d.risk_level);
                 extra.put("risk_score", String.valueOf(d.risk_score));
                 extra.put("decision_rule", d.playbook_rule);
                 extra.put("policy_source", d.policy_source);
+                if (issuedIn != null) extra.put(RiskEpoch.METADATA_KEY, String.valueOf(issuedIn));
+                if (!v.refuse()) RiskEpoch.record(userSession, d.risk_epoch);
             } else {
                 extra.put("fallback_outcome", v.refuse() ? "deny" : "allow");
             }
@@ -96,6 +134,17 @@ public final class TokenRiskStage {
     /** The error event Keycloak emits when a token stage refuses: already reported by the decision, never a credential failure. */
     public static boolean isRefusal(Map<String, String> details) {
         return details != null && DENY_DESCRIPTION.equals(details.get("client_policy_error_detail"));
+    }
+
+    /** The user session a token belongs to (the id is the session id the token carries), or null. */
+    private static org.keycloak.models.UserSessionModel userSessionOf(KeycloakSession session, RealmModel realm, String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) return null;
+        try {
+            org.keycloak.models.UserSessionModel us = session.sessions().getUserSession(realm, sessionId);
+            return us != null ? us : session.sessions().getOfflineUserSession(realm, sessionId);
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     private static String attr(ClientModel client, String name) {

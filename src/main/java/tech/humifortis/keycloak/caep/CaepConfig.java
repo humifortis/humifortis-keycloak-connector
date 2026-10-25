@@ -16,7 +16,8 @@ public record CaepConfig(
         boolean enforceStepUp,
         boolean enforceStepUpAsReauth,
         boolean enforceAccountDisabled,
-        boolean enforceCredentialCompromise
+        boolean enforceCredentialCompromise,
+        boolean enforceAccountRecovery
 ) {
     public static final String PREFIX = "hf.caep.";
 
@@ -26,7 +27,17 @@ public record CaepConfig(
                       boolean supportAssuranceLevelChange, boolean enforceSessionRevoked, boolean enforceStepUp,
                       boolean enforceStepUpAsReauth) {
         this(enabled, issuer, audience, jwksUri, clockSkewSeconds, replayEnabled, replayTtlSeconds, supportSessionRevoked,
-                supportAssuranceLevelChange, enforceSessionRevoked, enforceStepUp, enforceStepUpAsReauth, false, false);
+                supportAssuranceLevelChange, enforceSessionRevoked, enforceStepUp, enforceStepUpAsReauth, false, false, false);
+    }
+
+    /** As above, with the account responses; a recovery is not enforced. */
+    public CaepConfig(boolean enabled, String issuer, String audience, String jwksUri, int clockSkewSeconds,
+                      boolean replayEnabled, int replayTtlSeconds, boolean supportSessionRevoked,
+                      boolean supportAssuranceLevelChange, boolean enforceSessionRevoked, boolean enforceStepUp,
+                      boolean enforceStepUpAsReauth, boolean enforceAccountDisabled, boolean enforceCredentialCompromise) {
+        this(enabled, issuer, audience, jwksUri, clockSkewSeconds, replayEnabled, replayTtlSeconds, supportSessionRevoked,
+                supportAssuranceLevelChange, enforceSessionRevoked, enforceStepUp, enforceStepUpAsReauth,
+                enforceAccountDisabled, enforceCredentialCompromise, false);
     }
 
     public static CaepConfig fromRealm(RealmModel realm) {
@@ -45,7 +56,9 @@ public record CaepConfig(
                 getBool(realm, "enforce.stepUpAsReauth", false),
                 // an analyst response that changes the account: opt in per realm
                 getBool(realm, "enforce.accountDisabled", false),
-                getBool(realm, "enforce.credentialCompromise", false)
+                getBool(realm, "enforce.credentialCompromise", false),
+                // a recovery removes second factors: opt in per realm
+                getBool(realm, "enforce.accountRecovery", false)
         );
     }
 

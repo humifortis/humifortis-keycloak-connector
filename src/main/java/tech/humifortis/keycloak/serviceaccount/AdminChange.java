@@ -17,6 +17,8 @@ public final class AdminChange {
     public static final String CREDENTIAL_ROTATED = "credential_rotated";
     public static final String CLIENT_CONFIG_CHANGED = "client_config_changed";
     public static final String CLIENT_DELETED = "client_deleted";
+    /** A person deleted by an administrator (the user's own deletion is the {@code delete_account} event). */
+    public static final String USER_DELETED = "user_deleted";
 
     private static final Pattern USER_PATH = Pattern.compile("^users/([^/]+)(/.*)?$");
     private static final Pattern CLIENT_PATH = Pattern.compile("^clients/([^/]+)(/.*)?$");
@@ -39,6 +41,9 @@ public final class AdminChange {
             if ("CREATE".equals(o)) return PRIVILEGE_GRANTED;
             if ("DELETE".equals(o)) return PRIVILEGE_REVOKED;
             return null;
+        }
+        if ("USER".equals(resourceType) && "DELETE".equals(o) && p.matches("^users/[^/]+$")) {
+            return USER_DELETED;
         }
         if ("CLIENT".equals(resourceType)) {
             if (p.contains("client-secret")) {

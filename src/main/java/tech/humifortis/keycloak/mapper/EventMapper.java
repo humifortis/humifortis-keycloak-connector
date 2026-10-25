@@ -22,7 +22,9 @@ public class EventMapper {
     // ----------------------------------------------------------------
 
     public HumifortisEvent fromKeycloakEvent(Event event) {
-        if (ProviderFailure.is(event.getType())) return fromProviderFailure(event);
+        if (ProviderFailure.is(event.getType(), event.getError())) return fromProviderFailure(event);
+        // a wrong user code on a device verification page: the application is attacked, nobody has signed in (P12)
+        if (TokenEvents.isDeviceUserCodeFailure(event.getType())) return TokenEvents.deviceUserCodeFailure(event);
         HumifortisEvent humiEvent = new HumifortisEvent();
 
         String realmId = event.getRealmId() != null ? event.getRealmId() : "unknown";
@@ -32,8 +34,11 @@ public class EventMapper {
             // the entity type is stated here, never inferred downstream. The client id identifies it
             // (a failed login has no user id, and the id is what an operator recognises).
             String clientId = event.getClientId() != null && !event.getClientId().isBlank() ? event.getClientId() : "unknown";
-            humiEvent.setEntityId(String.format("service_account:keycloak:%s:%s", realmId, clientId));
-            humiEvent.setEntityType("service_account");
+            // a service account, or an agent when its client declares it (the listener copies the declaration to the event)
+            String clientType = tech.humifortis.keycloak.serviceaccount.ClientEntityType.of(
+                    event.getDetails() != null ? event.getDetails().get(tech.humifortis.keycloak.serviceaccount.ClientEntityType.ATTR) : null);
+            humiEvent.setEntityId(tech.humifortis.keycloak.serviceaccount.ClientEntityType.entityId(clientType, realmId, clientId));
+            humiEvent.setEntityType(clientType);
         } else {
             String userId  = event.getUserId()  != null ? event.getUserId()  : detailOrFallback(event.getDetails(), "userId", null);
             if (userId == null || userId.isBlank()) {
@@ -43,9 +48,12 @@ public class EventMapper {
             humiEvent.setEntityType("user");
         }
         humiEvent.setTimestamp(Instant.ofEpochMilli(event.getTime()).toString());
-        humiEvent.setEventType(isDisabledAccountAttempt(event.getType(), event.getError())
+        // the token events keep their own names (a bound token presented without its proof, a device grant)
+        String tokenEvent = TokenEvents.eventTypeOf(event.getType(), TokenEvents.refusal(event), serviceAccount);
+        humiEvent.setEventType(tokenEvent != null ? tokenEvent : isDisabledAccountAttempt(event.getType(), event.getError())
                 ? ACCOUNT_DISABLED : mapEventType(event.getType()));
         humiEvent.setSource("keycloak");
+        if (event.getType() == EventType.REFRESH_TOKEN_ERROR) applyRefreshFailure(humiEvent, event.getDetails());
         // Propagate Keycloak's native event UUID — used by core for idempotent deduplication.
         if (event.getId() != null) {
             humiEvent.setEventId(event.getId());
@@ -317,6 +325,19 @@ public class EventMapper {
         return type == EventType.LOGIN_ERROR && org.keycloak.events.Errors.USER_DISABLED.equals(error);
     }
 
+    /**
+     * A refresh Keycloak refused (P19): a rotated token presented again is the theft of the token and an event of its own; any other
+     * refusal says why (the session is gone, the token is invalid) and is never a failed password.
+     */
+    static void applyRefreshFailure(HumifortisEvent humiEvent, Map<String, String> details) {
+        String reason = details != null ? details.get("reason") : null;
+        String failure = tech.humifortis.keycloak.token.RefreshTokens.failureOf(reason);
+        if (tech.humifortis.keycloak.token.RefreshTokens.FAILURE_REUSE.equals(failure)) {
+            humiEvent.setEventType(tech.humifortis.keycloak.token.RefreshTokens.EVENT_REUSED);
+        }
+        humiEvent.addMetadata("refresh_failure", failure);
+    }
+
     private String mapEventType(EventType eventType) {
         return switch (eventType) {
             case LOGIN                  -> "auth_login_success";
@@ -411,6 +432,11 @@ public class EventMapper {
         // Client/redirect context — useful for OAuth abuse detection
         putIfPresent(humiEvent, details, "redirect_uri");
         putIfPresent(humiEvent, details, "response_type");
+        // the key a token request proved with DPoP (Keycloak validated the proof; the thumbprint is RFC 7638)
+        if (details.get(tech.humifortis.keycloak.token.DpopProof.DETAIL_JKT) != null) {
+            putIfPresent(humiEvent, details, tech.humifortis.keycloak.token.DpopProof.DETAIL_JKT);
+            humiEvent.addMetadata("dpop_bound", true);
+        }
 
         // Auth method context
         putIfPresent(humiEvent, details, "auth_method");
@@ -467,8 +493,13 @@ public class EventMapper {
         if (details == null || details.isEmpty()) return;
         putIfPresent(humiEvent, details, "grant_type");
         putIfPresent(humiEvent, details, "client_auth_method");
+        // how the client proved its identity, in the product's words (set by the listener from the request)
+        putIfPresent(humiEvent, details, tech.humifortis.keycloak.serviceaccount.ClientAuthentication.KEY_METHOD);
+        putIfPresent(humiEvent, details, tech.humifortis.keycloak.serviceaccount.ClientAuthentication.KEY_SUBJECT);
+        putIfPresent(humiEvent, details, "token.audience");
         // the risk stage already decided this request (core records no second decision)
         putIfPresent(humiEvent, details, tech.humifortis.keycloak.serviceaccount.ServiceAccountRiskExecutor.DETAIL_DECISION_STAGE);
+        putIfPresent(humiEvent, details, ServiceAccountContext.KEY_SECRET_ROTATION_AGE_DAYS);
         for (String key : ServiceAccountContext.KEYS) {
             putIfPresent(humiEvent, details, key);
         }

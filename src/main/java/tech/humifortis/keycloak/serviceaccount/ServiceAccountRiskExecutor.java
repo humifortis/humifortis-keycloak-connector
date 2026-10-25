@@ -93,7 +93,7 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
                         .evaluateServiceAccount(realm, client, flowId, md, executors, declined),
                 (type, entityId, flowId, realm, requested, enforced, mode, extra) -> {
                     SaasConfig config = SaasConfig.fromEnv();
-                    EventQueue.shared(config).submit(DecisionReport.build(type, entityId, DecisionReport.SERVICE_ACCOUNT,
+                    EventQueue.shared(config).submit(DecisionReport.build(type, entityId, entityId.substring(0, entityId.indexOf(':')),
                             flowId, realm.getName(), requested, enforced, mode, extra));
                 });
     }
@@ -129,6 +129,57 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
         String requestedScope = sa.getParams() != null ? sa.getParams().getFirst("scope") : null;
 
         Map<String, Object> metadata = collect(realm, client, requestedScope);
+        // how the client proved its identity (P11): the method, and the subject of its certificate or token
+        metadata.putAll(ClientAuthentication.resolve(client.getClientAuthenticatorType(),
+                sa.getParams() != null ? sa.getParams().getFirst("client_assertion") : null, ClientAuthentication.certificateSubject(session)));
+        // the tool server the token is for (RFC 8707 resource indicator): an agent asks for a token per tool (P17, AG-2)
+        String resource = sa.getParams() != null ? sa.getParams().getFirst("resource") : null;
+        if (resource != null && !resource.isBlank()) metadata.put("token.audience", resource.length() > 255 ? resource.substring(0, 255) : resource);
+        decideAndEnforce(realm, client, flowId, metadata, null);
+    }
+
+    /** The decision stage of an exchange of the token of a service account (MA-2, MA-4). */
+    public static final String DECISION_STAGE_TOKEN_EXCHANGE = "token_exchange";
+
+    /**
+     * A service account's token is exchanged (RFC 8693): decided as the machine it is, with the audience judged like a scope
+     * (MA-2). {@code actor} is the client that presents the exchange when it is not the machine itself (a machine acting for
+     * another machine, MA-4); it is on the decision report. Throws the refusal like the token request does.
+     *
+     * @param client the service account's client whose token is exchanged
+     */
+    public void executeExchange(ClientModel client, String flowId, String requestedScope, String audience, String actor) throws ClientPolicyException {
+        runTokenStage(client, flowId, requestedScope, audience, actor, DECISION_STAGE_TOKEN_EXCHANGE, "urn:ietf:params:oauth:grant-type:token-exchange");
+    }
+
+    /** The decision stage of a refresh of the token of a service account (MA-6): a client configured to receive a refresh token. */
+    public static final String DECISION_STAGE_TOKEN_REFRESH = "token_refresh";
+
+    /** A service account refreshes a token it holds (MA-6): decided as the machine it is, like its token request. */
+    public void executeRefresh(ClientModel client, String flowId) throws ClientPolicyException {
+        runTokenStage(client, flowId, null, null, null, DECISION_STAGE_TOKEN_REFRESH, "refresh_token");
+    }
+
+    private void runTokenStage(ClientModel client, String flowId, String requestedScope, String audience, String actor, String stage, String grantType) throws ClientPolicyException {
+        RealmModel realm = session.getContext().getRealm();
+        if (realm == null || client == null || !client.isServiceAccountsEnabled()) return;
+        if ("off".equalsIgnoreCase(attr(client, ATTR_ENFORCEMENT))) return;
+        if (!SaasConfig.fromEnv().hasApiKey()) return;
+        Map<String, Object> metadata = collect(realm, client, requestedScope);
+        // the exchange is judged on its own scope and audience, not on the scopes the client is granted by default
+        metadata.remove(ServiceAccountContext.KEY_REQUESTED_SCOPES);
+        metadata.remove(ServiceAccountContext.KEY_HISTORICAL_SCOPES);
+        metadata.putAll(ServiceAccountContext.resolveExchange(client.getAttributes(), (String) metadata.get("ip"), requestedScope, audience, Instant.now()));
+        metadata.put("grant_type", grantType);
+        Map<String, String> more = new LinkedHashMap<>();
+        more.put(DETAIL_DECISION_STAGE, stage);
+        if (audience != null && !audience.isBlank()) more.put("exchange_audience", audience.trim());
+        if (actor != null && !actor.isBlank()) more.put("actor_client_id", actor);
+        decideAndEnforce(realm, client, flowId, metadata, more);
+    }
+
+    private void decideAndEnforce(RealmModel realm, ClientModel client, String flowId, Map<String, Object> metadata,
+                                  Map<String, String> more) throws ClientPolicyException {
         boolean allowDisable = ClientContainment.allowsDisable(client);
         HumifortisRiskEvaluator.ServiceAccountResult result = evaluate.call(realm, client, flowId, metadata,
                 allowDisable ? EXECUTORS_WITH_DISABLE : EXECUTORS,
@@ -139,6 +190,7 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
         String entityId = entityId(realm, client);
         Map<String, String> extra = new LinkedHashMap<>();
         extra.put("client_id", client.getClientId());
+        if (more != null) extra.putAll(more);
         Object ip = metadata.get("ip");
         if (ip != null) extra.put("ip", ip.toString());
         if (result.decision() != null) {
@@ -262,6 +314,9 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
         md.putAll(ServiceAccountContext.resolve(client.getAttributes(), ip, grantedScopes(client, requestedScope), Instant.now()));
         try {
             UserModel saUser = session.users().getServiceAccount(client);
+            String rotated = ServiceAccountContext.secretRotationAgeDays(client.getAttributes(),
+                    saUser != null ? saUser.getCreatedTimestamp() : null, Instant.now());
+            if (rotated != null) md.put(ServiceAccountContext.KEY_SECRET_ROTATION_AGE_DAYS, rotated);
             if (saUser != null) {
                 new UserContextExtractor().extract(session, realm, saUser).writeTo(md::put);
                 md.put("username", saUser.getUsername());
@@ -297,8 +352,9 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
         return out.isEmpty() ? null : String.join(" ", new ArrayList<>(out));
     }
 
-    static String entityId(RealmModel realm, ClientModel client) {
-        return String.format("service_account:keycloak:%s:%s", realm.getId(), client.getClientId());
+    public static String entityId(RealmModel realm, ClientModel client) {
+        // a service account, or an agent when the client declares it (P17): the type is the prefix of the id
+        return ClientEntityType.entityId(ClientEntityType.of(client.getAttribute(ClientEntityType.ATTR)), realm.getId(), client.getClientId());
     }
 
     private static String attr(ClientModel client, String name) {

@@ -87,6 +87,7 @@ public class CaepReceiverResource {
         boolean hasFailure = false;
         Set<String> actions = new LinkedHashSet<>();
         Set<String> errors = new LinkedHashSet<>();
+        Map<String, Object> detail = null;
 
         for (Map.Entry<String, com.google.gson.JsonElement> eventEntry : set.events().entrySet()) {
             String eventUri = eventEntry.getKey();
@@ -104,6 +105,7 @@ public class CaepReceiverResource {
             audit(buildAudit(set, realm, "valid", result.processingResult(), result.action(), result.error(), receivedAt, eventName, extractDecisionId(eventEntry.getValue())));
             if ("processed".equals(result.processingResult())) hasProcessed = true;
             if ("enforcement_failed".equals(result.processingResult())) hasFailure = true;
+            if (result.detail() != null) detail = result.detail();
             if (result.action() != null && !result.action().isBlank() && !"none".equals(result.action())) actions.add(result.action());
             if (result.error() != null && !result.error().isBlank()) errors.add(result.error());
         }
@@ -112,12 +114,13 @@ public class CaepReceiverResource {
         String finalAction = actions.isEmpty() ? "none" : String.join(",", actions);
         String finalError = errors.isEmpty() ? "" : String.join(" | ", errors);
 
-        return Response.ok(Map.of(
-                "status", "accepted",
-                "processing", finalProcessing,
-                "action", finalAction,
-                "error", finalError
-        )).build();
+        Map<String, Object> reply = new java.util.LinkedHashMap<>();
+        reply.put("status", "accepted");
+        reply.put("processing", finalProcessing);
+        reply.put("action", finalAction);
+        reply.put("error", finalError);
+        if (detail != null) reply.put("detail", detail);
+        return Response.ok(reply).build();
     }
 
     private CaepAuditRecord buildAudit(

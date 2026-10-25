@@ -123,6 +123,16 @@ public class HumifortisRiskEvaluator {
 
     /** As above, for the authentication event {@code eventType} (a reused session is not a credential check). */
     EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId, boolean local, String eventType) {
+        return evaluateDetailed(realm, knownUser, flowId, local, eventType, null);
+    }
+
+    /** A person's decision for a touch of an artefact already issued (a refresh, a reused session); null when Humifortis did not answer. */
+    public EvaluateResponse decisionFor(RealmModel realm, UserModel user, String flowId, String eventType, StageContext stage) {
+        return evaluateDetailed(realm, user, flowId, false, eventType, stage).decision();
+    }
+
+    /** As above, with what the stage knows about the touch ({@code stage} is null for a browser sign-in). */
+    EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId, boolean local, String eventType, StageContext stage) {
         if (knownUser == null) {
             logger.warnf("[HumifortisRiskEvaluator] User is null — fallback");
             return EvaluationResult.fallback("null_user");
@@ -153,6 +163,12 @@ public class HumifortisRiskEvaluator {
             event.timestamp   = Instant.now().toString();
             event.flow_id     = flowId; // propagate Keycloak auth session id — groups with enforcement events
             event.metadata    = buildMetadata(realm, knownUser);
+            applyStage(event.metadata, stage);
+            // the other live sessions of the person: judged for their diversity, never for their number (P20)
+            if (!EVENT_SESSION_REUSED.equals(eventType)) {
+                tech.humifortis.keycloak.user.LiveSessions.writeTo(session, realm, knownUser,
+                        stage != null ? stage.currentSessionId() : null, meta2(event.metadata));
+            }
 
             EvaluateRequestPayload payload = new EvaluateRequestPayload();
             payload.event             = event;
@@ -282,7 +298,26 @@ public class HumifortisRiskEvaluator {
         safeCollect(meta, "identity_provider", () -> BrokerContext.identityProvider(session.getContext().getAuthenticationSession()));
         // a brokered sign-in says whether it is the first one (true / false); a sign-in through the realm's own form has no
         // provider, so the question does not apply and the value is absent
+        // the assurance level the request asks for (RFC 9470 acr_values), so the factor that reaches it is decided (P13)
+        safeCollect(meta, "requested_assurance_level", () -> {
+            int level = AssuranceLevel.requested(session.getContext().getAuthenticationSession());
+            return level > 0 ? level : null;
+        });
+        // outside signals (P15), each off without its setting and fail-open: the number changed hands, the device is compliant
+        safeCollect(meta, "sim_swapped_recently", () -> tech.humifortis.keycloak.external.ExternalSignals.shared()
+                .simSwappedRecently(SmsGateway.phoneOf(user, System.getenv())));
+        safeCollect(meta, "device_posture", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return tech.humifortis.keycloak.external.ExternalSignals.shared().devicePosture(
+                    as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_ID) : null);
+        });
         safeCollect(meta, "first_broker_login", () -> BrokerContext.firstBrokerLoginOf(session.getContext().getAuthenticationSession()));
+        // what the provider sign-in meant for the account (P5, P4, P22): an existing account linked at this first sign-in, whether the
+        // realm trusts the provider's e-mail, whether the provider asserted a multi-factor sign-in, every provider the account is linked to
+        safeCollect(meta, "broker_account_linked", () -> BrokerContext.accountLinkedOf(session.getContext().getAuthenticationSession()));
+        safeCollect(meta, "idp_email_trusted", () -> BrokerContext.emailTrustedOf(session.getContext().getAuthenticationSession(), realm));
+        safeCollect(meta, "idp_asserted_mfa", () -> BrokerContext.assertedMfaOf(session.getContext().getAuthenticationSession()));
+        safeCollect(meta, "linked_identity_providers", () -> BrokerContext.linkedProvidersOf(session, realm, user));
 
         // Device signals — collected by HumifortisDeviceCollectorAuthenticator (step before this one)
         safeCollect(meta, "device_id", () -> {
@@ -412,6 +447,23 @@ public class HumifortisRiskEvaluator {
 
         meta.put("realm", realm.getName());
         return meta;
+    }
+
+    /** Adds what the stage knows and, for a request that is not the person's own, takes the network of the request out. */
+    static void applyStage(Map<String, Object> metadata, StageContext stage) {
+        if (stage == null) return;
+        if (!stage.personNetwork()) {
+            for (String key : StageContext.NETWORK_KEYS) metadata.remove(key);
+        }
+        if (stage.extra() != null) {
+            stage.extra().forEach((k, v) -> {
+                if (v != null && !v.isBlank()) metadata.put(k, v);
+            });
+        }
+    }
+
+    private static java.util.function.BiConsumer<String, String> meta2(Map<String, Object> metadata) {
+        return metadata::put;
     }
 
     /** Helper: runs collector, silently skips on exception or null result. */
@@ -585,7 +637,9 @@ public class HumifortisRiskEvaluator {
      * @param tenantId           Humifortis tenant ID (from env var or realm name)
      * @param deviceId           Stable FingerprintJS visitorId — when provided, ensures one
      *                           trusted_devices row per physical device (token rotates on MFA).
-     *                           When null/empty, legacy behaviour: one row per token.
+     *                           Required: a trust is bound to the device it was issued to, so a token
+     *                           without a device identifier is not registered (the browser is simply not
+     *                           remembered and the step-up is asked again).
      * @param deviceName         Human-readable label, e.g. "Desktop-Chrome-149, macOS 10.15"
      * @param platform           OS family, e.g. "macOS"
      * @param ipAddress          End-user IP at trust time
@@ -596,11 +650,15 @@ public class HumifortisRiskEvaluator {
             logger.warnf("[HumifortisRiskEvaluator] registerTrustToken: API key missing");
             return;
         }
+        if (isBlank(deviceId)) {
+            logger.debugf("[HumifortisRiskEvaluator] registerTrustToken: no device identifier, the browser is not remembered (entity=%s)", canonicalEntityId);
+            return;
+        }
         TrustTokenPayload payload = new TrustTokenPayload();
         payload.entity_id = canonicalEntityId;
         payload.token_hash = tokenHash;
         payload.ttl_days = 30;
-        payload.device_id = isBlank(deviceId) ? null : deviceId;
+        payload.device_id = deviceId;
         payload.device_name = isBlank(deviceName) ? null : deviceName;
         payload.platform = isBlank(platform) ? null : platform;
         payload.ip_address = isBlank(ipAddress) ? null : ipAddress;
@@ -712,6 +770,8 @@ public class HumifortisRiskEvaluator {
         public EvaluationContext context;
         /** True when this is the original answer of an earlier request with the same event id, not a new decision. */
         public boolean replayed;
+        /** The person's risk epoch after this decision: the number of changes of her risk level so far (0: none yet). */
+        @SerializedName("risk_epoch") public long risk_epoch;
     }
 
     /**
@@ -746,8 +806,8 @@ public class HumifortisRiskEvaluator {
         try {
             EventPayload event = new EventPayload();
             event.event_id    = callId;
-            event.entity_id   = String.format("service_account:keycloak:%s:%s", realm.getId(), client.getClientId());
-            event.entity_type = "service_account"; // the type the listener sends for CLIENT_LOGIN: same risk key
+            event.entity_type = tech.humifortis.keycloak.serviceaccount.ClientEntityType.of(client.getAttribute(tech.humifortis.keycloak.serviceaccount.ClientEntityType.ATTR)); // the type the listener sends for CLIENT_LOGIN: same risk key
+            event.entity_id   = tech.humifortis.keycloak.serviceaccount.ClientEntityType.entityId(event.entity_type, realm.getId(), client.getClientId());
             event.event_type  = "auth_credential_verified"; // the client's credentials are valid; no token yet
             event.source      = "keycloak";
             event.timestamp   = Instant.now().toString();

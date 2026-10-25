@@ -32,9 +32,24 @@ public final class ProviderFailure {
 
     private ProviderFailure() {}
 
-    /** Whether Keycloak's event is the failure of a provider's sign-in (not a person's, not a first-login-flow error). */
-    public static boolean is(EventType type) {
-        return type == EventType.IDENTITY_PROVIDER_LOGIN_ERROR;
+    /**
+     * What a SAML provider's answer is refused for: the signature, the destination or the content of the response (an expired
+     * assertion and a wrong audience both give "invalid_saml_response"). Keycloak reports them as an identity provider RESPONSE
+     * error, before the person is known; the provider answered, but with something that cannot be trusted.
+     */
+    private static final java.util.Set<String> UNTRUSTWORTHY_RESPONSE = java.util.Set.of(
+            "invalid_saml_response", "invalid_signature", "invalid_saml_document", "invalid_destination",
+            "missing_required_destination", "invalid_artifact_response");
+
+    /**
+     * Whether Keycloak's event is the failure of a provider's sign-in (not a person's, not a first-login-flow error): the
+     * round trip failed ({@code IDENTITY_PROVIDER_LOGIN_ERROR}), or the provider answered with a response Keycloak refuses to
+     * trust (a SAML assertion with a bad signature, an expired one, a wrong audience). A person who cancels or is refused at the
+     * provider is a RESPONSE error with another code and is not a failure of the provider.
+     */
+    public static boolean is(EventType type, String error) {
+        if (type == EventType.IDENTITY_PROVIDER_LOGIN_ERROR) return true;
+        return type == EventType.IDENTITY_PROVIDER_RESPONSE_ERROR && error != null && UNTRUSTWORTHY_RESPONSE.contains(error);
     }
 
     /** The provider's alias in a broker callback path, or null when the path is not one. */
