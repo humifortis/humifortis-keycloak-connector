@@ -40,7 +40,7 @@ The Humifortis Keycloak Connector follows a **"thin client"** architecture where
 
 ```bash
 # Download the connector
-wget https://github.com/humifortis/keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
+wget https://github.com/humifortis/humifortis-keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
 
 # Install to Keycloak providers directory
 cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
@@ -83,7 +83,7 @@ connector already installed and compiled in:
 ```bash
 docker build -t humifortis .
 docker run -p 8080:8080 \
-  -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -e HUMIFORTIS_API_KEY=humi_kc_prod_xxx \
   humifortis start-dev
 ```
@@ -396,7 +396,7 @@ Instead of checking 19+ dashboards across different systems, security teams get:
 ### Build
 
 ```bash
-git clone https://github.com/humifortis/keycloak-connector.git
+git clone https://github.com/humifortis/humifortis-keycloak-connector.git
 cd humifortis-keycloak-connector
 mvn clean package
 ```

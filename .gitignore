@@ -1,6 +1,6 @@
 # Maven
 target/
-# built connector jars (build-all.sh writes one at the root; releases publish it, git does not track it)
+# a connector jar copied to the repo root is a build artifact: target/ holds the build, releases publish the jar
 /*.jar
 pom.xml.tag
 pom.xml.releaseBackup

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Docker image**: a multi-stage `Dockerfile` (Keycloak 26.8.1, the version in `pom.xml`) builds the connector and
+  ships it preinstalled; `docker-compose.yml` runs a dev stack. See `DOCKER.md`.
+- **Release workflow**: pushing a `v*` tag builds, tests and publishes the jar as a GitHub release
+  (`.github/workflows/build.yml`).
 - **The key a token request proved with DPoP is reported**: a sign-in, client login, refresh, token exchange or device grant that
   succeeded with a DPoP proof (RFC 9449) carries the RFC 7638 thumbprint of the key Keycloak accepted (`dpop_jkt`) and
   `dpop_bound=true`. The connector reads the key from the header of the proof Keycloak has just validated; it never validates a
@@ -111,6 +115,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Keycloak's own `client.secret.creation.time`) and the request (IP, granted `scope`), and sent
   as `service_account.*` metadata. An undeclared or invalid expectation is not sent, so nothing is
   judged against a guess. See README, "Service accounts".
+
+### Planned (not yet scheduled)
+
+- Enhanced logging and diagnostics
+- Metrics export (Prometheus format)
+- Health check endpoint
+- Configuration validation
+- Additional event types
+- Performance optimizations
+- Circuit breaker for SaaS communication
+- Request retry logic
+- Event batching for high-volume scenarios
+
 ## [1.1.0] — 2026-10-03
 
 ### Added
@@ -149,7 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unused `SaasClient` methods (`getRiskDecision`, `evaluate`, `sendBlockEventAsync`) and the
   `RiskDecision` / `SaasException` types.
 
-## [1.0.0]
+## [1.0.0] - 2024-12-27
 
 ### Added
 - Device signals on **failed logins**: add `scripts=js/humifortis-device.bundle.js` to the login
@@ -176,9 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `login.ftl.snippet` (superseded by the one-line theme setting) and the unused
   `HumifortisRBAAuthenticator` class.
 
-## [1.0.0] - 2024-12-27
-
-### Added
+### Initial release
 - Initial release of Humifortis Keycloak Connector
 - Event listener SPI implementation for capturing authentication events
 - RBA authenticator SPI implementation for risk-based access control
@@ -229,17 +244,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Java 11+ HttpClient for HTTP communication
 - JBoss Logging for diagnostics
 
-## [Unreleased]
-
-### Planned Features
-- Enhanced logging and diagnostics
-- Metrics export (Prometheus format)
-- Health check endpoint
-- Configuration validation
-- Additional event types
-- Performance optimizations
-- Circuit breaker for SaaS communication
-- Request retry logic
-- Event batching for high-volume scenarios
-
-[1.0.0]: https://github.com/humifortis/keycloak-connector/releases/tag/v1.0.0
+[1.0.0]: https://github.com/humifortis/humifortis-keycloak-connector/releases/tag/v1.0.0

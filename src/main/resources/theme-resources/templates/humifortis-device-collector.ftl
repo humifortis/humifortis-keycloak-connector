@@ -10,18 +10,11 @@
      The <noscript> block provides a manual fallback for browsers
      with JavaScript disabled.
 
-     DEPLOYMENT (JAR mode — recommended):
-       This file lives in theme-resources/templates/ inside the JAR.
-       It is accessible to ANY login theme automatically.
-       The JS bundle must be in:
-         themes/<your-theme>/login/resources/js/humifortis-device.bundle.js
+     DEPLOYMENT:
+       This file lives in theme-resources/templates/ inside the JAR and the JS
+       bundle in theme-resources/resources/js/, so both are served to ANY login
+       theme automatically - nothing to copy into a theme.
        Referenced via ${url.resourcesPath}/js/humifortis-device.bundle.js.
-
-     STANDALONE (copy mode — alternative):
-       Copy this file to your Keycloak theme:
-         themes/<your-theme>/login/humifortis-device-collector.ftl
-       Copy the JS bundle to:
-         themes/<your-theme>/login/resources/js/humifortis-device.bundle.js
      ============================================================ -->
 <!DOCTYPE html>
 <html>

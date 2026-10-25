@@ -22,7 +22,7 @@ Deploy the Humifortis Keycloak Connector in under 5 minutes.
 
 ```bash
 # Download
-wget https://github.com/humifortis/keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
+wget https://github.com/humifortis/humifortis-keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
 
 # Install
 cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
@@ -126,4 +126,4 @@ Configure policies in SaaS dashboard:
 
 - 📧 support@humifortis.tech
 - 📚 https://docs.humifortis.tech/connectors/keycloak
-- 🐛 https://github.com/humifortis/keycloak-connector/issues
+- 🐛 https://github.com/humifortis/humifortis-keycloak-connector/issues

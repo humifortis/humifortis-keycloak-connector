@@ -6,8 +6,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
       # Required — get this from Connectors → Add Connector in the Humifortis SaaS dashboard
       HUMIFORTIS_API_KEY: ${HUMIFORTIS_API_KEY:?set HUMIFORTIS_API_KEY in your environment or a .env file}
       HUMIFORTIS_API_URL: ${HUMIFORTIS_API_URL:-https://api.humifortis.educosmic.tech}

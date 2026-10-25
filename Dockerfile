@@ -8,8 +8,8 @@
 #
 # Run:
 #   docker run -p 8080:8080 \
-#     -e KEYCLOAK_ADMIN=admin \
-#     -e KEYCLOAK_ADMIN_PASSWORD=admin \
+#     -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+#     -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
 #     -e HUMIFORTIS_API_KEY=humi_kc_prod_xxx \
 #     humifortis start-dev
 #
@@ -41,7 +41,7 @@ FROM quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}
 
 LABEL org.opencontainers.image.title="humifortis" \
       org.opencontainers.image.description="Keycloak with the Humifortis risk-based auth connector preinstalled" \
-      org.opencontainers.image.source="https://github.com/humifortis/keycloak-connector" \
+      org.opencontainers.image.source="https://github.com/humifortis/humifortis-keycloak-connector" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 COPY --from=builder /build/target/humifortis-keycloak-connector.jar /opt/keycloak/providers/humifortis-keycloak-connector.jar

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project implements a thin client connector that integrates Keycloak (versions 22.x, 23.x, 24.x) with the Humifortis SaaS platform for centralized risk-based authentication and security event monitoring.
+This project implements a thin client connector that integrates Keycloak (version 26.8.1) with the Humifortis SaaS platform for centralized risk-based authentication and security event monitoring.
 
 **Version:** 1.0.0  
 **License:** Apache 2.0  
@@ -267,7 +267,7 @@ X-API-Key: {api-key}
 
 ```bash
 # Clone repository
-git clone https://github.com/humifortis/keycloak-connector.git
+git clone https://github.com/humifortis/humifortis-keycloak-connector.git
 cd humifortis-keycloak-connector
 
 # Build
@@ -287,7 +287,7 @@ mvn clean package
 
 ```bash
 # 1. Download
-wget https://github.com/humifortis/keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
+wget https://github.com/humifortis/humifortis-keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
 
 # 2. Install
 cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
@@ -442,7 +442,7 @@ Potential improvements (not yet implemented):
 
 ## Support and Resources
 
-- **Repository:** https://github.com/humifortis/keycloak-connector
+- **Repository:** https://github.com/humifortis/humifortis-keycloak-connector
 - **SaaS Console:** https://humifortis.educosmic.tech
 - **Documentation:** https://docs.humifortis.tech/connectors/keycloak
 - **Email Support:** support@humifortis.tech

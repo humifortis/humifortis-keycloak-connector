@@ -30,7 +30,7 @@ Example API key format: `humi_kc_prod_a1b2c3d4e5f6g7h8i9j0`
 
 ```bash
 # Download the latest release
-wget https://github.com/humifortis/keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
+wget https://github.com/humifortis/humifortis-keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
 
 # Copy to Keycloak providers directory
 sudo cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
@@ -40,7 +40,7 @@ sudo cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
 
 ```bash
 # Clone the repository
-git clone https://github.com/humifortis/keycloak-connector.git
+git clone https://github.com/humifortis/humifortis-keycloak-connector.git
 cd humifortis-keycloak-connector
 
 # Build with Maven
@@ -631,7 +631,7 @@ After installation:
 For assistance:
 - Email: support@humifortis.tech
 - Documentation: https://docs.humifortis.tech/connectors/keycloak
-- GitHub Issues: https://github.com/humifortis/keycloak-connector/issues
+- GitHub Issues: https://github.com/humifortis/humifortis-keycloak-connector/issues
 
 ## Which Humifortis call does the connector make
 

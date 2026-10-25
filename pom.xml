@@ -12,7 +12,7 @@
 
     <name>Humifortis Keycloak Connector</name>
     <description>Thin client connector for Keycloak to Humifortis SaaS centralized risk management</description>
-    <url>https://github.com/humifortis/keycloak-connector</url>
+    <url>https://github.com/humifortis/humifortis-keycloak-connector</url>
 
     <licenses>
         <license>
