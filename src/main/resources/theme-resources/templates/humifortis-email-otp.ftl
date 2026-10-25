@@ -1,17 +1,17 @@
 <#import "template.ftl" as layout>
 <@layout.registrationLayout displayInfo=true; section>
     <#if section = "header">
-        ${msg("emailOtpTitle","Email Verification")}
+        <#if channel?? && channel == "sms">${msg("smsOtpTitle","Text Message Verification")}<#else>${msg("emailOtpTitle","Email Verification")}</#if>
     <#elseif section = "form">
         <form id="kc-otp-login-form" class="${properties.kcFormClass!}" action="${url.loginAction}" method="post">
             <div class="${properties.kcFormGroupClass!}">
                 <div class="${properties.kcLabelWrapperClass!}">
                     <label for="email_otp" class="${properties.kcLabelClass!}">
-                        ${msg("emailOtpLabel","Enter the 6-digit code sent to")} ${email!}
+                        <#if channel?? && channel == "sms">${msg("smsOtpLabel","Enter the 6-digit code sent by text message to")}<#else>${msg("emailOtpLabel","Enter the 6-digit code sent to")}</#if> ${email!}
                     </label>
                 </div>
                 <div class="${properties.kcInputWrapperClass!}">
-                    <input id="email_otp" name="email_otp" type="text"
+                    <input id="email_otp" name="email_otp" type="text" data-channel="${channel!'email'}"
                            autocomplete="one-time-code" inputmode="numeric"
                            pattern="[0-9]{6}" maxlength="6" required autofocus
                            class="${properties.kcInputClass!}"

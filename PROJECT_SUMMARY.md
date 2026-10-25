@@ -8,7 +8,7 @@ This project implements a thin client connector that integrates Keycloak (versio
 **License:** Apache 2.0  
 **Language:** Java 17+  
 **Build System:** Maven  
-**Target Platform:** Keycloak 22+
+**Target Platform:** Keycloak 26.8.1
 
 ## Architecture Philosophy
 
@@ -177,8 +177,9 @@ public CompletableFuture<Void> sendEventAsync(HumifortisEvent event) {
 |----------|----------|---------|-------------|
 | `HUMIFORTIS_API_URL` | No | `https://api.humifortis.educosmic.tech` | SaaS API endpoint |
 | `HUMIFORTIS_API_KEY` | **Yes** | - | API key from SaaS registration |
-| `HUMIFORTIS_TIMEOUT_MS` | No | `5000` | HTTP request timeout |
-| `HUMIFORTIS_FALLBACK_ALLOW` | No | `true` | Allow access if SaaS unreachable |
+| `HUMIFORTIS_TIMEOUT_MS` | No | `800` | Timeout of one API attempt (ms) |
+| `HUMIFORTIS_EVALUATE_BUDGET_MS` | No | `1500` | Longest a login waits for a decision, retries included (ms) |
+| `HUMIFORTIS_FALLBACK` | No | (tenant policy) | `allow` \| `step_up` \| `deny` when Humifortis cannot answer — overrides the tenant policy (see INSTALLATION.md, Resilience) |
 
 ### Keycloak Setup
 
@@ -304,7 +305,7 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
 ```yaml
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:23.0
+    image: quay.io/keycloak/keycloak:26.8.1
     environment:
       - HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
     volumes:

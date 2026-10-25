@@ -1,5 +1,7 @@
 # Maven
 target/
+# built connector jars (build-all.sh writes one at the root; releases publish it, git does not track it)
+/*.jar
 pom.xml.tag
 pom.xml.releaseBackup
 pom.xml.versionsBackup

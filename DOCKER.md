@@ -12,12 +12,12 @@ and authenticators as usual (see [INSTALLATION.md](INSTALLATION.md) steps 5–6)
 docker build -t humifortis .
 ```
 
-By default the image is built on `quay.io/keycloak/keycloak:23.0.3`, matching
+By default the image is built on `quay.io/keycloak/keycloak:26.8.1`, matching
 the `keycloak.version` the connector is compiled against in `pom.xml`. To
-target a different supported version (22.x–24.x):
+target a different Keycloak version (only 26.8.1 is built and tested against; others are unsupported):
 
 ```bash
-docker build --build-arg KEYCLOAK_VERSION=24.0.5 -t humifortis:24 .
+docker build --build-arg KEYCLOAK_VERSION=26.8.1 -t humifortis:26 .
 ```
 
 ## Run

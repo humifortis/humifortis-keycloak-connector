@@ -15,7 +15,8 @@
 #
 # See DOCKER.md for full configuration and production notes.
 
-ARG KEYCLOAK_VERSION=23.0.3
+# Keep in sync with <keycloak.version> in pom.xml.
+ARG KEYCLOAK_VERSION=26.8.1
 
 ########################################
 # Stage 1 — build the connector JAR
@@ -28,10 +29,8 @@ WORKDIR /build
 COPY pom.xml .
 RUN mvn -B -q dependency:go-offline || true
 
-# Java sources + the prebuilt device-collector UI bundle (checked into git,
-# consumed by the maven-resources-plugin copy-js-bundle execution).
+# Java sources; the device-collector JS bundle is committed under src/main/resources.
 COPY src ./src
-COPY device-collector-ui ./device-collector-ui
 
 RUN mvn -B -q clean package -DskipTests
 

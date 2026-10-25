@@ -7,7 +7,7 @@
 
     <groupId>tech.humifortis</groupId>
     <artifactId>humifortis-keycloak-connector</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
     <packaging>jar</packaging>
 
     <name>Humifortis Keycloak Connector</name>
@@ -25,7 +25,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
-        <keycloak.version>23.0.3</keycloak.version>
+        <!-- The one Keycloak version this connector is built and tested against (a fork targets another one). -->
+        <keycloak.version>26.8.1</keycloak.version>
         <gson.version>2.10.1</gson.version>
         <!-- GeoIP and UA parsing removed — handled server-side by humifortis-core -->
     </properties>
@@ -94,6 +95,13 @@
             <version>5.11.0</version>
             <scope>test</scope>
         </dependency>
+        <!-- JAX-RS runtime so unit tests can build a Response (Keycloak provides its own at run time) -->
+        <dependency>
+            <groupId>org.jboss.resteasy</groupId>
+            <artifactId>resteasy-core</artifactId>
+            <version>6.2.4.Final</version>
+            <scope>test</scope>
+        </dependency>
         <!-- jboss-logging impl for tests (provided by Keycloak in prod) -->
         <dependency>
             <groupId>org.jboss.slf4j</groupId>
@@ -112,34 +120,9 @@
     <build>
         <finalName>humifortis-keycloak-connector</finalName>
         <plugins>
-            <!-- ── Copy JS bundle from device-collector-ui/dist into the theme ── -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-resources-plugin</artifactId>
-                <version>3.3.1</version>
-                <executions>
-                    <execution>
-                        <id>copy-js-bundle</id>
-                        <phase>generate-resources</phase>
-                        <goals><goal>copy-resources</goal></goals>
-                        <configuration>
-                            <outputDirectory>
-                                ${project.basedir}/src/main/resources/theme/humifortis/login/resources/js
-                            </outputDirectory>
-                            <overwrite>true</overwrite>
-                            <resources>
-                                <resource>
-                                    <directory>${project.basedir}/device-collector-ui/dist</directory>
-                                    <includes>
-                                        <include>humifortis-device.bundle.js</include>
-                                    </includes>
-                                    <filtering>false</filtering>
-                                </resource>
-                            </resources>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
+            <!-- The device-collector JS bundle is built by device-collector-ui (npm run build) straight
+                 into src/main/resources/theme-resources/resources/js and committed: the jar is
+                 self-contained and served to every login theme. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
