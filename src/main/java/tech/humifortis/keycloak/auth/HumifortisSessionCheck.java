@@ -88,13 +88,16 @@ public class HumifortisSessionCheck implements RequiredActionProvider {
         // the epoch of the person's risk the reused session was last let through in (P23)
         UserSessionModel reused = reusedSession(session, realm);
         Long issuedIn = tech.humifortis.keycloak.token.RiskEpoch.of(reused);
-        StageContext stage = issuedIn == null ? null
-                : new StageContext(Map.of(tech.humifortis.keycloak.token.RiskEpoch.METADATA_KEY, String.valueOf(issuedIn)), true, null);
+        Map<String, String> extra = new LinkedHashMap<>(
+                tech.humifortis.keycloak.user.SessionProof.metadata(reused, org.keycloak.common.util.Time.currentTime()));
+        if (issuedIn != null) extra.put(tech.humifortis.keycloak.token.RiskEpoch.METADATA_KEY, String.valueOf(issuedIn));
+        StageContext stage = extra.isEmpty() ? null : new StageContext(extra, true, null);
         HumifortisRiskEvaluator.EvaluateResponse d = new HumifortisRiskEvaluator(session)
                 .evaluateDetailed(realm, user, flowId, false, HumifortisRiskEvaluator.EVENT_SESSION_REUSED, stage).decision();
         if (d != null && !DecisionReport.refusesToken(HumifortisRiskAuthenticator.appliedAction(d, d.action != null && !d.action.isBlank() ? d.action : "ALLOW"),
                 HumifortisRiskAuthenticator.resolveMode(d))) {
             tech.humifortis.keycloak.token.RiskEpoch.record(reused, d.risk_epoch);
+            tech.humifortis.keycloak.token.SessionAssuranceMapper.record(reused, d);
         }
         return d;
     }

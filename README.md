@@ -28,13 +28,12 @@ The Humifortis Keycloak Connector follows a **"thin client"** architecture where
 
 ## 🚀 Quick Start (5 Minutes)
 
-### Step 1: Register Connector in SaaS
+### Step 1: Get an API key in Humifortis
 
-1. Login to [https://humifortis.educosmic.tech](https://humifortis.educosmic.tech)
-2. Go to: **Connectors → Add Connector**
-3. Select: **Keycloak**
-4. Name: "Production Keycloak"
-5. Copy the generated API key: `humi_kc_prod_a1b2c3d4e5f6...`
+1. Sign in to Humifortis (or open **Getting started**, whose first step makes the key and shows the two settings below, ready to copy)
+2. Go to **Integrations → API keys**
+3. Make a key for an application named "Keycloak"
+4. Copy the key now: it is shown once. A key starts with `hf_`: `hf_a1b2c3d4e5f6...`
 
 ### Step 2: Install in Keycloak
 
@@ -47,7 +46,7 @@ cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
 
 # Configure environment variables
 export HUMIFORTIS_API_URL=https://api.humifortis.educosmic.tech
-export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
+export HUMIFORTIS_API_KEY=hf_a1b2c3d4e5f6...
 
 # Build and restart Keycloak
 /opt/keycloak/bin/kc.sh build
@@ -83,6 +82,10 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
 |----------|----------|---------|-------------|
 | `HUMIFORTIS_API_URL` | No | `https://api.humifortis.educosmic.tech` | Humifortis SaaS API endpoint |
 | `HUMIFORTIS_API_KEY` | **Yes** | - | API key from SaaS connector registration |
+| `HUMIFORTIS_AUTH` | No | `oauth2` | `oauth2` or `api_key`. OAuth2 client credentials: the API key is the client secret (its first 10 characters the client id), exchanged for 5-minute access tokens; the connector falls back to the key when the token endpoint cannot answer |
+| `HUMIFORTIS_CLIENT_ID` / `HUMIFORTIS_CLIENT_SECRET` | No | key prefix / the key | Set only to use another OAuth2 client than the key |
+| `HUMIFORTIS_MTLS_CERT` / `HUMIFORTIS_MTLS_KEY` | No | off | PEM files (key in PKCS#8) of the client certificate: mutual TLS, with either way of authenticating |
+| `HUMIFORTIS_CA_FILE` | No | JVM roots | PEM file of the private CA that signed the Humifortis endpoint certificate |
 | `HUMIFORTIS_DECISION_SOURCE` | No | `server` | `server`: the action returned by Humifortis is enforced. `local`: your flow decides with the Humifortis conditions (an explicit deny is still enforced). Can also be set per flow on the risk authenticator. See INSTALLATION.md, "Let your own flow decide" |
 | `HUMIFORTIS_CONTEXT_ATTRIBUTES` | No | (non-sensitive network and device attributes) | Attributes written to the session for the conditions of the `local` source |
 | `HUMIFORTIS_TIMEOUT_MS` | No | `800` | Timeout of one API attempt (ms) |
@@ -127,7 +130,7 @@ password is looked at, with its generic message, so a refused attempt reveals no
 
 ```bash
 # Required
-export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
+export HUMIFORTIS_API_KEY=hf_a1b2c3d4e5f6...
 
 # Optional
 export HUMIFORTIS_API_URL=https://api.humifortis.educosmic.tech

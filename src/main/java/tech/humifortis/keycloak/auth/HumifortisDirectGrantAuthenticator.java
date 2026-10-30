@@ -56,6 +56,9 @@ public class HumifortisDirectGrantAuthenticator implements Authenticator {
         HumifortisRiskEvaluator.EvaluationResult result =
                 new HumifortisRiskEvaluator(context.getSession()).evaluateDetailed(realm, user, flowId, false);
         HumifortisRiskEvaluator.EvaluateResponse d = result.decision();
+        // the decision's assurance and the password just verified, noted for the session the grant creates
+        if (d != null) tech.humifortis.keycloak.token.SessionAssuranceMapper.notesOf(d).forEach(context.getAuthenticationSession()::setUserSessionNote);
+        tech.humifortis.keycloak.user.SessionProof.record(context.getAuthenticationSession(), 1, null, org.keycloak.common.util.Time.currentTime());
 
         String requested;
         String applied;

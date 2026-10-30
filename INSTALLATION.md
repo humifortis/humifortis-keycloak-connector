@@ -9,20 +9,15 @@ This guide provides detailed instructions for installing and configuring the Hum
 - Access to Keycloak server filesystem
 - Humifortis SaaS account
 
-## Step 1: Register Connector in Humifortis SaaS
+## Step 1: Get an API key in Humifortis
 
-1. Navigate to [https://humifortis.educosmic.tech](https://humifortis.educosmic.tech)
-2. Login with your credentials
-3. Go to **Connectors** → **Add Connector**
-4. Fill in the connector details:
-   - **Connector Name:** Production Keycloak (or your preferred name)
-   - **Connector Type:** Keycloak
-   - **Environment:** Production (or Staging/Development)
-   - **Tags:** (optional) prod, eu-west-1, auth, etc.
-5. Click **Create Connector**
-6. **Copy the generated API key** - you'll need this in Step 2
+1. Sign in to Humifortis. A new organisation opens **Getting started**: its first step makes the key and shows `HUMIFORTIS_API_URL` and `HUMIFORTIS_API_KEY` filled in, ready to copy
+2. Or go to **Integrations → API keys** and make a key for an application (for example "Keycloak")
+3. **Copy the key now**: it is shown once. If it is lost, make a new key and revoke the old one
 
-Example API key format: `humi_kc_prod_a1b2c3d4e5f6g7h8i9j0`
+The key decides which organisation the events belong to: one connector, one key, one organisation.
+
+Example API key format: `hf_a1b2c3d4e5f6g7h8i9j0`
 
 ## Step 2: Download and Install Connector
 
@@ -67,7 +62,7 @@ Add these lines in the `[Service]` section:
 ```ini
 [Service]
 Environment="HUMIFORTIS_API_URL=https://api.humifortis.educosmic.tech"
-Environment="HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6..."
+Environment="HUMIFORTIS_API_KEY=hf_a1b2c3d4e5f6..."
 Environment="HUMIFORTIS_TIMEOUT_MS=5000"
 Environment="HUMIFORTIS_FALLBACK_ALLOW=true"
 ```
@@ -88,7 +83,7 @@ services:
     image: quay.io/keycloak/keycloak:26.8.1
     environment:
       - HUMIFORTIS_API_URL=https://api.humifortis.educosmic.tech
-      - HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
+      - HUMIFORTIS_API_KEY=hf_a1b2c3d4e5f6...
       - HUMIFORTIS_TIMEOUT_MS=5000
       - HUMIFORTIS_FALLBACK_ALLOW=true
     volumes:
@@ -98,7 +93,7 @@ services:
 Or via command line:
 
 ```bash
-docker run -e HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6... \
+docker run -e HUMIFORTIS_API_KEY=hf_a1b2c3d4e5f6... \
   -e HUMIFORTIS_API_URL=https://api.humifortis.educosmic.tech \
   -v ./humifortis-keycloak-connector.jar:/opt/keycloak/providers/humifortis-keycloak-connector.jar \
   quay.io/keycloak/keycloak:26.8.1 start
@@ -115,7 +110,7 @@ metadata:
   name: humifortis-config
 type: Opaque
 stringData:
-  HUMIFORTIS_API_KEY: humi_kc_prod_a1b2c3d4e5f6...
+  HUMIFORTIS_API_KEY: hf_a1b2c3d4e5f6...
   HUMIFORTIS_API_URL: https://api.humifortis.educosmic.tech
 ```
 
@@ -143,7 +138,7 @@ Add to your start script or profile:
 
 ```bash
 export HUMIFORTIS_API_URL=https://api.humifortis.educosmic.tech
-export HUMIFORTIS_API_KEY=humi_kc_prod_a1b2c3d4e5f6...
+export HUMIFORTIS_API_KEY=hf_a1b2c3d4e5f6...
 export HUMIFORTIS_TIMEOUT_MS=5000
 export HUMIFORTIS_FALLBACK_ALLOW=true
 ```

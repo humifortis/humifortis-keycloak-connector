@@ -114,6 +114,14 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         HumifortisRiskEvaluator.EvaluationResult evaluation =
                 evaluator.evaluateDetailed(context.getRealm(), context.getUser(), flowId, local);
         Risk risk = evaluation.risk();
+        if (evaluation.decision() != null) {
+            tech.humifortis.keycloak.token.SessionAssuranceMapper.notesOf(evaluation.decision())
+                    .forEach(context.getAuthenticationSession()::setUserSessionNote);
+        }
+        if (BrokerContext.identityProvider(context.getAuthenticationSession()) == null) {
+            tech.humifortis.keycloak.user.SessionProof.record(context.getAuthenticationSession(), 1, null,
+                    org.keycloak.common.util.Time.currentTime());
+        }
 
         // Step 2 — read explicit server decision from evaluator result
         HumifortisRiskEvaluator.EvaluateResponse serverDecision = evaluation.decision();

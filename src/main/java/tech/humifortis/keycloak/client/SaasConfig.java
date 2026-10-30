@@ -13,6 +13,10 @@ import org.jboss.logging.Logger;
  *   <tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
  *   <tr><td>HUMIFORTIS_API_URL</td><td>https://api.humifortis.educosmic.tech</td><td>API endpoint</td></tr>
  *   <tr><td>HUMIFORTIS_API_KEY</td><td>(required)</td><td>API key; without it every login falls back</td></tr>
+ *   <tr><td>HUMIFORTIS_AUTH</td><td>oauth2</td><td>oauth2 | api_key: how the connector authenticates. oauth2 exchanges the key for short-lived tokens (client credentials) and falls back to the key when the token endpoint cannot answer</td></tr>
+ *   <tr><td>HUMIFORTIS_CLIENT_ID / HUMIFORTIS_CLIENT_SECRET</td><td>key prefix / the API key</td><td>the OAuth2 client; the API key is the client secret, so there is nothing more to configure</td></tr>
+ *   <tr><td>HUMIFORTIS_MTLS_CERT / HUMIFORTIS_MTLS_KEY</td><td>(off)</td><td>PEM files of the client certificate (mutual TLS); present means used, with either way of authenticating</td></tr>
+ *   <tr><td>HUMIFORTIS_CA_FILE</td><td>(JVM roots)</td><td>PEM file of the private CA that signed the Humifortis endpoint certificate</td></tr>
  *   <tr><td>HUMIFORTIS_TENANT_ID</td><td>realm name</td><td>tenant</td></tr>
  *   <tr><td>HUMIFORTIS_TIMEOUT_MS</td><td>800</td><td>timeout of ONE attempt</td></tr>
  *   <tr><td>HUMIFORTIS_EVALUATE_BUDGET_MS</td><td>1500</td><td>total time a login may wait for a decision, retries included</td></tr>
@@ -45,6 +49,12 @@ public class SaasConfig {
     private final boolean insecureSsl;
     private final String insecureSslCertSha256;
     private final boolean allowInsecureHttp;
+    private final boolean oauth2;
+    private final String clientId;
+    private final String clientSecret;
+    private final String mtlsCert;
+    private final String mtlsKey;
+    private final String caFile;
 
     public SaasConfig() {
         this(System.getenv());
@@ -62,6 +72,17 @@ public class SaasConfig {
         this.insecureSsl = HttpClientFactory.isInsecureSslEnabled(env.get("INSECURE_SSL"));
         this.insecureSslCertSha256 = emptyToNull(env.get("HUMIFORTIS_INSECURE_SSL_CERT_SHA256"));
         this.allowInsecureHttp = "true".equalsIgnoreCase(env.get("HUMIFORTIS_ALLOW_INSECURE_HTTP"));
+        this.oauth2 = !"api_key".equalsIgnoreCase(getEnvOrDefault(env, "HUMIFORTIS_AUTH", "oauth2").replace('-', '_'));
+        // the API key is the client secret and its first ten characters are the client id: one credential, nothing more to configure
+        this.clientSecret = emptyToNull(env.get("HUMIFORTIS_CLIENT_SECRET")) != null ? env.get("HUMIFORTIS_CLIENT_SECRET").trim() : this.apiKey;
+        String id = emptyToNull(env.get("HUMIFORTIS_CLIENT_ID"));
+        this.clientId = id != null ? id.trim() : (this.apiKey != null ? this.apiKey.substring(0, Math.min(10, this.apiKey.length())) : null);
+        this.mtlsCert = emptyToNull(env.get("HUMIFORTIS_MTLS_CERT"));
+        this.mtlsKey = emptyToNull(env.get("HUMIFORTIS_MTLS_KEY"));
+        this.caFile = emptyToNull(env.get("HUMIFORTIS_CA_FILE"));
+        if ((mtlsCert == null) != (mtlsKey == null)) {
+            logger.warn("[Humifortis] HUMIFORTIS_MTLS_CERT and HUMIFORTIS_MTLS_KEY go together — mutual TLS is off");
+        }
     }
 
     /** The configuration of this process (the environment does not change while it runs). */
@@ -125,6 +146,22 @@ public class SaasConfig {
     public String getApiKey() { return apiKey; }
 
     public boolean hasApiKey() { return apiKey != null; }
+
+    /** True when the connector authenticates with OAuth2 client credentials (the default) and has a secret to do it with. */
+    public boolean useOAuth2() { return oauth2 && clientId != null && clientSecret != null; }
+
+    public String getClientId() { return clientId; }
+
+    public String getClientSecret() { return clientSecret; }
+
+    /** True when both PEM files of the client certificate are configured. */
+    public boolean useMtls() { return mtlsCert != null && mtlsKey != null; }
+
+    public String getMtlsCert() { return mtlsCert; }
+
+    public String getMtlsKey() { return mtlsKey; }
+
+    public String getCaFile() { return caFile; }
 
     /** The tenant: HUMIFORTIS_TENANT_ID, else the realm name. */
     public String tenantIdOr(String realmName) { return tenantId != null ? tenantId : realmName; }

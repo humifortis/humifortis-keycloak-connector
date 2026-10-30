@@ -89,6 +89,8 @@ public final class AssuranceLevel {
             int level = achieved(as.getAuthNote(NOTE_ACHIEVED_LEVEL));
             if (level < 1) return;
             new AcrStore(context.getSession(), as).setLevelAuthenticated(level);
+            tech.humifortis.keycloak.user.SessionProof.record(as, level, as.getAuthNote(HumifortisStepUpRouter.NOTE_MFA_KIND),
+                    org.keycloak.common.util.Time.currentTime());
         } catch (RuntimeException e) {
             LOG.debugf("[Humifortis] the level of authentication could not be recorded: %s", e.getMessage());
         }

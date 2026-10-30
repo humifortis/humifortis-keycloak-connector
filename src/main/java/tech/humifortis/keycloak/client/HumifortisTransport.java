@@ -77,9 +77,10 @@ public final class HumifortisTransport {
 
     /** The transport of this endpoint, shared process-wide. */
     public static HumifortisTransport shared(SaasConfig config) {
-        String key = config.getApiUrl() + "|" + config.isInsecureSsl() + "|" + config.getInsecureSslCertSha256();
+        String key = config.getApiUrl() + "|" + config.isInsecureSsl() + "|" + config.getInsecureSslCertSha256() + "|" + config.getMtlsCert() + "|" + config.getCaFile();
         return SHARED.computeIfAbsent(key, k -> {
-            HttpClient client = HttpClientFactory.create(config.getTimeoutMs(), config.isInsecureSsl(), config.getInsecureSslCertSha256());
+            HttpClient client = HttpClientFactory.create(config.getTimeoutMs(), config.isInsecureSsl(), config.getInsecureSslCertSha256(),
+                    config.useMtls() ? config.getMtlsCert() : null, config.useMtls() ? config.getMtlsKey() : null, config.getCaFile());
             Sender sender = request -> {
                 HttpResponse<String> r = client.send(request, HttpResponse.BodyHandlers.ofString());
                 return new Response(r.statusCode(), r.body(), r.headers().firstValue("Retry-After").orElse(null));
@@ -97,11 +98,14 @@ public final class HumifortisTransport {
                 .uri(URI.create(config.getApiUrl() + path))
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
-                .header("X-API-Key", config.getApiKey())
                 .header("X-Connector-Type", "keycloak")
                 .header("X-Connector-Version", CONNECTOR_VERSION)
                 .POST(HttpRequest.BodyPublishers.ofString(json));
         if (tenantId != null && !tenantId.isBlank()) b.header("X-Tenant-ID", tenantId);
+        // the only place that knows how the connector authenticates: a token when OAuth2 can give one, else the key
+        String bearer = config.useOAuth2() ? TokenSource.shared(config).bearer() : null;
+        if (bearer != null) b.header("Authorization", "Bearer " + bearer);
+        else if (config.getApiKey() != null) b.header("X-API-Key", config.getApiKey());
         return b;
     }
 

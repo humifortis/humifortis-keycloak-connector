@@ -74,9 +74,11 @@ public final class TokenRiskStage {
 
             org.keycloak.models.UserSessionModel userSession = userSessionOf(session, realm, flowId);
             Long issuedIn = RiskEpoch.of(userSession);
-            if (issuedIn != null) {
+            java.util.Map<String, String> proof = tech.humifortis.keycloak.user.SessionProof.metadata(userSession, org.keycloak.common.util.Time.currentTime());
+            if (issuedIn != null || !proof.isEmpty()) {
                 java.util.Map<String, String> extra = new LinkedHashMap<>(context != null && context.extra() != null ? context.extra() : Map.of());
-                extra.put(RiskEpoch.METADATA_KEY, String.valueOf(issuedIn));
+                extra.putAll(proof);
+                if (issuedIn != null) extra.put(RiskEpoch.METADATA_KEY, String.valueOf(issuedIn));
                 context = new tech.humifortis.keycloak.auth.StageContext(extra, context == null || context.personNetwork(),
                         context != null ? context.currentSessionId() : null);
             }
@@ -98,7 +100,10 @@ public final class TokenRiskStage {
                 extra.put("decision_rule", d.playbook_rule);
                 extra.put("policy_source", d.policy_source);
                 if (issuedIn != null) extra.put(RiskEpoch.METADATA_KEY, String.valueOf(issuedIn));
-                if (!v.refuse()) RiskEpoch.record(userSession, d.risk_epoch);
+                if (!v.refuse()) {
+                    RiskEpoch.record(userSession, d.risk_epoch);
+                    SessionAssuranceMapper.record(userSession, d);
+                }
             } else {
                 extra.put("fallback_outcome", v.refuse() ? "deny" : "allow");
             }

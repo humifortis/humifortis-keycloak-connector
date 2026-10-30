@@ -13,9 +13,9 @@ Deploy the Humifortis Keycloak Connector in under 5 minutes.
 ### 1. Get API Key (1 minute)
 
 ```
-1. Login to https://humifortis.educosmic.tech
-2. Connectors → Add Connector → Keycloak
-3. Copy API key: humi_kc_prod_xxxxx...
+1. Sign in to Humifortis (a new organisation opens Getting started, which makes the key for you)
+2. Integrations → API keys → make a key
+3. Copy the key now (shown once): hf_xxxxx...
 ```
 
 ### 2. Install Connector (2 minutes)
@@ -28,7 +28,7 @@ wget https://github.com/humifortis/keycloak-connector/releases/latest/download/h
 cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
 
 # Configure
-export HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
+export HUMIFORTIS_API_KEY=hf_xxxxx...
 
 # Restart
 /opt/keycloak/bin/kc.sh build
@@ -66,7 +66,7 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.8.1
     environment:
-      - HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
+      - HUMIFORTIS_API_KEY=hf_xxxxx...
     volumes:
       - ./humifortis-keycloak-connector.jar:/opt/keycloak/providers/humifortis-keycloak-connector.jar
     command: start-dev

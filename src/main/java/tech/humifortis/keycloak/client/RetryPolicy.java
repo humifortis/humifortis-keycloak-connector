@@ -31,6 +31,11 @@ public record RetryPolicy(int maxAttempts, long baseDelayMs, long maxDelayMs, lo
         return new RetryPolicy(3, 50, 400, config.getEvaluateBudgetMs(), config.getTimeoutMs());
     }
 
+    /** Getting an access token: the budget of a login, so a token that cannot be had falls back to the key in time. */
+    public static RetryPolicy token(SaasConfig config) {
+        return new RetryPolicy(3, 50, 400, config.getEvaluateBudgetMs(), config.getTimeoutMs());
+    }
+
     /** A service-account token request: two attempts at most, within its own short budget. */
     public static RetryPolicy serviceAccount(SaasConfig config) {
         long budget = config.getServiceAccountEvaluateBudgetMs();

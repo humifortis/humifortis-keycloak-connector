@@ -717,6 +717,17 @@ public class HumifortisRiskEvaluator {
      * Server /evaluate response — public so HumifortisRiskAuthenticator can reference it
      * without re-deserializing. Geo fields come from the server (server does GeoIP).
      */
+    /** The assurance level of a decision, as core serves it (the dimensions stay on the decision record). */
+    public static class SessionAssurance {
+        @SerializedName("level")      public Integer level;
+        @SerializedName("limited_by") public String  limited_by;
+    }
+
+    /** The visibility of a decision: full, partial or blind. */
+    public static class Visibility {
+        @SerializedName("level") public String level;
+    }
+
     public static class EvaluateResponse {
         public String       entity_id;
         public double       risk_score;
@@ -734,6 +745,10 @@ public class HumifortisRiskEvaluator {
         @SerializedName("required_assurance")   public int          required_assurance;
         @SerializedName("achieved_assurance")   public int          achieved_assurance;
         @SerializedName("assurance_shortfall")  public boolean      assurance_shortfall;
+        /** The session assurance level of the decision (docs/session-assurance-sas.spec.md), absent for an unregistered type. */
+        @SerializedName("session_assurance")    public SessionAssurance session_assurance;
+        /** How much of what the decision needed Humifortis observed. */
+        @SerializedName("visibility")           public Visibility   visibility;
         @SerializedName("fallback_reason")      public String       fallback_reason;
         @SerializedName("derived_signals")      public List<String> derived_signals;
         @SerializedName("contributing_factors") public List<String> contributing_factors;

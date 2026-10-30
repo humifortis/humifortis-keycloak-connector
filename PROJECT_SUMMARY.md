@@ -293,7 +293,7 @@ wget https://github.com/humifortis/keycloak-connector/releases/latest/download/h
 cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
 
 # 3. Configure
-export HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
+export HUMIFORTIS_API_KEY=hf_xxxxx...
 
 # 4. Build and restart
 /opt/keycloak/bin/kc.sh build
@@ -307,7 +307,7 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.8.1
     environment:
-      - HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
+      - HUMIFORTIS_API_KEY=hf_xxxxx...
     volumes:
       - ./humifortis-keycloak-connector.jar:/opt/keycloak/providers/humifortis-keycloak-connector.jar
     command: start-dev
