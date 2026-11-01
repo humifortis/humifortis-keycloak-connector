@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`AGENTS.md` and `docs/roadmap.md`**: the contributor contract (work cycle, architecture, checks), with `CLAUDE.md` pointing to it, and the roadmap checklist linked to the org project.
 - **Docker image**: a multi-stage `Dockerfile` (Keycloak 26.8.1, the version in `pom.xml`) builds the connector and
   ships it preinstalled; `docker-compose.yml` runs a dev stack. See `DOCKER.md`.
 - **Release workflow**: pushing a `v*` tag builds, tests and publishes the jar as a GitHub release
@@ -23,14 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   password and moves nobody's risk.
 - **The protocol of the sign-in** (`auth_method`: `openid-connect` or `saml`) is on the evaluation and on the decision report, so a SAML application's sign-in is decided and recorded like an OIDC one, with its protocol on the decision record (P10).
 - **First brokered sign-in**: `first_broker_login` is `true` or `false` on every brokered evaluation (absent for a sign-in through the realm's own form), so a later sign-in is a known `false`, not an unknown.
-- **Kinds of WebAuthn credential** (docs/sso-and-external-idp-e2e.spec.md, P9): the kind (`security_key`, `device_bound`,
+- **Kinds of WebAuthn credential** ([sso-and-external-idp-e2e.spec.md](https://github.com/humifortis/humifortis-core/tree/develop/specs/sso-and-external-idp-e2e.spec.md), P9): the kind (`security_key`, `device_bound`,
   `synced`, `unknown`) is read from the backup flag the browser posts, at registration and at each step-up, and reported as
   `mfa_method_kind` with an opaque credential reference (`webauthn_credential`). The identity metadata lists the credentials
   held (`webauthn_credentials`). A WebAuthn registration (`UPDATE_CREDENTIAL`) is now reported as `mfa_token_enrolled`.
   When Humifortis accepts only a stronger kind (`required_factor_kind`), the step-up router refuses a weaker credential as
   a failed step-up.
 - **Account source** (`account_source`) on every user event and on the evaluation: `local`, `ldap:<provider>`, `ad:<provider>`
-  or `brokered:<alias>` (docs/sso-and-external-idp-e2e.spec.md, P8). Absent, never guessed, when the user cannot be resolved.
+  or `brokered:<alias>` ([sso-and-external-idp-e2e.spec.md](https://github.com/humifortis/humifortis-core/tree/develop/specs/sso-and-external-idp-e2e.spec.md), P8). Absent, never guessed, when the user cannot be resolved.
 - **Federated account age**: for a user with a federation link, the directory's creation attribute comes first, Keycloak's
   import time only when the directory gives none (P6).
 - **Directory outage**: a failed sign-in of a person the directory imported before, with no user resolved, is reported as
@@ -38,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Sign-in to a disabled account**: Keycloak's `user_disabled` login error (the password was right; Keycloak checks the
   enabled flag after it) is reported as `auth_account_disabled`, no longer as a failed sign-in counted as password guessing.
   It covers accounts disabled in Keycloak and, with a writable Active Directory federation, in the domain.
-- **The step-up factor is decided by Humifortis** (`required_factor` of `/evaluate`, docs/assurance-and-factor-selection.spec.md): the
+- **The step-up factor is decided by Humifortis** (`required_factor` of `/evaluate`, [assurance-and-factor-selection.spec.md](https://github.com/humifortis/humifortis-core/tree/develop/specs/assurance-and-factor-selection.spec.md)): the
   router challenges it and no longer chooses for a generic step-up. `mfa_challenge_succeeded` / `_failed` carry `required_factor`
   beside `mfa_method`, so a degraded challenge is measurable.
 - **SMS OTP step-up** (optional): `HUMIFORTIS_SMS_GATEWAY_URL` (+ `_TOKEN`, `HUMIFORTIS_SMS_PHONE_ATTRIBUTE`). A person without a verified
