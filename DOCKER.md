@@ -3,8 +3,9 @@
 The `humifortis` Docker image is a standard Keycloak image with the Humifortis
 connector JAR already installed in `/opt/keycloak/providers/` and compiled
 into the server via `kc.sh build` at image-build time. There's nothing else
-to install — pick the `humifortis` login theme and enable the event listener
-and authenticators as usual (see [INSTALLATION.md](INSTALLATION.md) steps 5–6).
+to install — enable the event listener and authenticators (see
+[INSTALLATION.md](INSTALLATION.md) steps 5–6); optionally add the one-line
+`scripts=` theme setting.
 
 ## Build
 
@@ -12,20 +13,22 @@ and authenticators as usual (see [INSTALLATION.md](INSTALLATION.md) steps 5–6)
 docker build -t humifortis .
 ```
 
-By default the image is built on `quay.io/keycloak/keycloak:23.0.3`, matching
+By default the image is built on `quay.io/keycloak/keycloak:26.8.1`, matching
 the `keycloak.version` the connector is compiled against in `pom.xml`. To
-target a different supported version (22.x–24.x):
+build on another Keycloak version (forks only — the connector is built and
+tested against the pinned version), change `keycloak.version` in `pom.xml` to
+match:
 
 ```bash
-docker build --build-arg KEYCLOAK_VERSION=24.0.5 -t humifortis:24 .
+docker build --build-arg KEYCLOAK_VERSION=<version> -t humifortis:custom .
 ```
 
 ## Run
 
 ```bash
 docker run -p 8080:8080 \
-  -e KEYCLOAK_ADMIN=admin \
-  -e KEYCLOAK_ADMIN_PASSWORD=admin \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+  -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -e HUMIFORTIS_API_KEY=humi_kc_prod_xxx \
   humifortis start-dev
 ```

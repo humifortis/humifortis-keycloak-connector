@@ -2,13 +2,13 @@
 
 ## Overview
 
-This project implements a thin client connector that integrates Keycloak (versions 22.x, 23.x, 24.x) with the Humifortis SaaS platform for centralized risk-based authentication and security event monitoring.
+This project implements a thin client connector that integrates Keycloak (version 26.8.1) with the Humifortis SaaS platform for centralized risk-based authentication and security event monitoring.
 
 **Version:** 1.0.0  
 **License:** Apache 2.0  
 **Language:** Java 17+  
 **Build System:** Maven  
-**Target Platform:** Keycloak 22+
+**Target Platform:** Keycloak 26.8.1
 
 ## Architecture Philosophy
 
@@ -177,8 +177,9 @@ public CompletableFuture<Void> sendEventAsync(HumifortisEvent event) {
 |----------|----------|---------|-------------|
 | `HUMIFORTIS_API_URL` | No | `https://api.humifortis.educosmic.tech` | SaaS API endpoint |
 | `HUMIFORTIS_API_KEY` | **Yes** | - | API key from SaaS registration |
-| `HUMIFORTIS_TIMEOUT_MS` | No | `5000` | HTTP request timeout |
-| `HUMIFORTIS_FALLBACK_ALLOW` | No | `true` | Allow access if SaaS unreachable |
+| `HUMIFORTIS_TIMEOUT_MS` | No | `800` | Timeout of one API attempt (ms) |
+| `HUMIFORTIS_EVALUATE_BUDGET_MS` | No | `1500` | Longest a login waits for a decision, retries included (ms) |
+| `HUMIFORTIS_FALLBACK` | No | (tenant policy) | `allow` \| `step_up` \| `deny` when Humifortis cannot answer — overrides the tenant policy (see INSTALLATION.md, Resilience) |
 
 ### Keycloak Setup
 
@@ -266,7 +267,7 @@ X-API-Key: {api-key}
 
 ```bash
 # Clone repository
-git clone https://github.com/humifortis/keycloak-connector.git
+git clone https://github.com/humifortis/humifortis-keycloak-connector.git
 cd humifortis-keycloak-connector
 
 # Build
@@ -286,7 +287,7 @@ mvn clean package
 
 ```bash
 # 1. Download
-wget https://github.com/humifortis/keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
+wget https://github.com/humifortis/humifortis-keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
 
 # 2. Install
 cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
@@ -304,7 +305,7 @@ export HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
 ```yaml
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:23.0
+    image: quay.io/keycloak/keycloak:26.8.1
     environment:
       - HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
     volumes:
@@ -441,7 +442,7 @@ Potential improvements (not yet implemented):
 
 ## Support and Resources
 
-- **Repository:** https://github.com/humifortis/keycloak-connector
+- **Repository:** https://github.com/humifortis/humifortis-keycloak-connector
 - **SaaS Console:** https://humifortis.educosmic.tech
 - **Documentation:** https://docs.humifortis.tech/connectors/keycloak
 - **Email Support:** support@humifortis.tech

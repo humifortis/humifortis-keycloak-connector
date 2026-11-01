@@ -1,5 +1,7 @@
 # Maven
 target/
+# a connector jar copied to the repo root is a build artifact: target/ holds the build, releases publish the jar
+/*.jar
 pom.xml.tag
 pom.xml.releaseBackup
 pom.xml.versionsBackup

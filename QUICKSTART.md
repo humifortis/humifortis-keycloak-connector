@@ -4,7 +4,7 @@ Deploy the Humifortis Keycloak Connector in under 5 minutes.
 
 ## Prerequisites
 
-- Keycloak 22+ running
+- Keycloak 26.8.1 running
 - Access to server filesystem
 - Humifortis SaaS account
 
@@ -22,7 +22,7 @@ Deploy the Humifortis Keycloak Connector in under 5 minutes.
 
 ```bash
 # Download
-wget https://github.com/humifortis/keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
+wget https://github.com/humifortis/humifortis-keycloak-connector/releases/latest/download/humifortis-keycloak-connector.jar
 
 # Install
 cp humifortis-keycloak-connector.jar /opt/keycloak/providers/
@@ -47,7 +47,7 @@ Save
 **Add to Auth Flow:**
 ```
 Authentication → Flows → Browser → Add Step
-Select: "Humifortis Risk-Based Authentication"
+Select: "Humifortis Risk Authenticator" (after "Humifortis Device Collector" — see INSTALLATION.md, Step 6)
 Place after: "Username Password Form"
 Requirement: REQUIRED
 Save
@@ -64,7 +64,7 @@ Save
 ```yaml
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:23.0
+    image: quay.io/keycloak/keycloak:26.8.1
     environment:
       - HUMIFORTIS_API_KEY=humi_kc_prod_xxxxx...
     volumes:
@@ -126,4 +126,4 @@ Configure policies in SaaS dashboard:
 
 - 📧 support@humifortis.tech
 - 📚 https://docs.humifortis.tech/connectors/keycloak
-- 🐛 https://github.com/humifortis/keycloak-connector/issues
+- 🐛 https://github.com/humifortis/humifortis-keycloak-connector/issues

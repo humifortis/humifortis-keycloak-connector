@@ -18,8 +18,8 @@ public class HumifortisStepUpRouterFactory implements AuthenticatorFactory {
     public List<ProviderConfigProperty> getConfigProperties() {
         return List.of(
             new ProviderConfigProperty("fallback.order", "MFA Fallback Order",
-                "Comma-separated method priority: EMAIL_OTP,TOTP,WEBAUTHN",
-                ProviderConfigProperty.STRING_TYPE, "EMAIL_OTP,TOTP,WEBAUTHN"),
+                "Comma-separated method priority: EMAIL_OTP,TOTP,WEBAUTHN,SMS_OTP",
+                ProviderConfigProperty.STRING_TYPE, "EMAIL_OTP,TOTP,WEBAUTHN,SMS_OTP"),
             new ProviderConfigProperty("default.method", "Default MFA Method",
                 "Fail-secure default when no action is set.",
                 ProviderConfigProperty.LIST_TYPE, "EMAIL_OTP"),
@@ -35,7 +35,7 @@ public class HumifortisStepUpRouterFactory implements AuthenticatorFactory {
     @Override public String getId()                { return PROVIDER_ID; }
     @Override public String getDisplayType()       { return "Humifortis Step-Up Router"; }
     @Override public String getHelpText()          {
-        return "Routes to EMAIL_OTP / TOTP / WebAuthn based on HUMIFORTIS_RISK_ACTION. "
+        return "Routes to EMAIL_OTP / SMS_OTP / TOTP / WebAuthn based on HUMIFORTIS_RISK_ACTION. "
              + "Place inside the MFA sub-flow triggered by HumifortisHighCondition.";
     }
     @Override public String getReferenceCategory() { return "humifortis"; }

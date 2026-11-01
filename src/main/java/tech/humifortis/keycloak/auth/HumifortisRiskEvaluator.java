@@ -1,24 +1,12 @@
 package tech.humifortis.keycloak.auth;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
-import java.time.Duration;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
-
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
+import java.util.UUID;
 
 import org.jboss.logging.Logger;
 import org.keycloak.models.KeycloakSession;
@@ -29,7 +17,15 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.annotations.SerializedName;
 
+import tech.humifortis.keycloak.client.EdgeRtt;
+import tech.humifortis.keycloak.client.HumifortisTransport;
+import tech.humifortis.keycloak.client.ProxySettings;
+import tech.humifortis.keycloak.client.RateLimitedLog;
+import tech.humifortis.keycloak.client.RetryPolicy;
+import tech.humifortis.keycloak.client.SaasConfig;
 import tech.humifortis.keycloak.model.Risk;
+import tech.humifortis.keycloak.user.UserContextExtractor;
+import tech.humifortis.keycloak.user.UserContextSnapshot;
 
 /**
  * Calls POST /api/v1/evaluate on Humifortis Core with the full authentication context.
@@ -38,7 +34,7 @@ import tech.humifortis.keycloak.model.Risk;
  * The server does ALL enrichment (GeoIP, UA parsing, device fingerprint, risk scoring,
  * playbook evaluation). This keeps the connector thin and the logic centralized.</p>
  *
- * <p>The server's playbook decision is stored in {@link #LAST_DECISION} (ThreadLocal)
+ * <p>The server's playbook decision is returned explicitly with the mapped risk result
  * so {@link HumifortisRiskAuthenticator} can enforce it without re-calling the API.</p>
  *
  * <h3>Circuit breaker</h3>
@@ -49,77 +45,43 @@ import tech.humifortis.keycloak.model.Risk;
  * <ul>
  *   <li>{@code HUMIFORTIS_API_URL}    — default {@code https://api.humifortis.com}</li>
  *   <li>{@code HUMIFORTIS_API_KEY}    — required</li>
- *   <li>{@code HUMIFORTIS_TIMEOUT_MS} — default 2000</li>
+ *   <li>{@code HUMIFORTIS_TIMEOUT_MS} — default 800 (one attempt)</li>
  *   <li>{@code HUMIFORTIS_TENANT_ID}  — default realm name</li>
  *   <li>{@code INSECURE_SSL=true}     — skip TLS verification (dev/test only)</li>
+ *   <li>{@code HUMIFORTIS_ALLOW_INSECURE_HTTP=true} — permit a non-TLS internal
+ *       endpoint in an explicitly configured development/test deployment only</li>
  * </ul>
  */
 public class HumifortisRiskEvaluator {
 
     private static final Logger logger = Logger.getLogger(HumifortisRiskEvaluator.class);
 
-    static final String ENV_API_URL    = "HUMIFORTIS_API_URL";
-    static final String ENV_API_KEY    = "HUMIFORTIS_API_KEY";
-    static final String ENV_TIMEOUT_MS = "HUMIFORTIS_TIMEOUT_MS";
     static final String ENV_TENANT_ID  = "HUMIFORTIS_TENANT_ID";
-
-    static final String DEFAULT_API_URL   = "https://api.humifortis.com";
-    static final int    DEFAULT_TIMEOUT_MS = 2000;
     static final String FAIL_OPEN_REASON   = "Humifortis unavailable - fail open";
 
-    // ── Circuit breaker (shared across all evaluator instances) ─────────────
-    private static volatile int  consecutiveFailures = 0;
-    private static volatile long circuitOpenUntil    = 0;
-    private static final int  CIRCUIT_OPEN_THRESHOLD   = 3;
-    private static final long CIRCUIT_OPEN_DURATION_MS = 10_000;
+    private static final RateLimitedLog misconfigLog = new RateLimitedLog(60_000);
+    private static final RateLimitedLog failureLog = new RateLimitedLog(60_000);
 
-    // ── Shared insecure HttpClient (created once via double-checked locking) ─
-    private static volatile HttpClient INSECURE_CLIENT;
-    private static final Object INSECURE_LOCK = new Object();
+    /** The event of a password sign-in; {@link #EVENT_SESSION_REUSED} is an existing session used for another application. */
+    public static final String EVENT_CREDENTIAL_VERIFIED = "auth_credential_verified";
+    public static final String EVENT_SESSION_REUSED = "auth_session_reused";
 
-    /** Thread-local that carries the latest server decision to the authenticator. */
-    public static final ThreadLocal<EvaluateResponse> LAST_DECISION = new ThreadLocal<>();
-
-    private final HttpClient      httpClient;
-    private final KeycloakSession session;
-    private final Gson            gson;
+    private final KeycloakSession     session;
+    private final SaasConfig          config;
+    private final HumifortisTransport transport;
+    private final Gson                gson;
+    private final UserContextExtractor userContextExtractor;
 
     public HumifortisRiskEvaluator(KeycloakSession session) {
-        this.session = session;
-        this.gson    = new GsonBuilder().create();
-
-        if ("true".equalsIgnoreCase(System.getenv("INSECURE_SSL"))) {
-            if (INSECURE_CLIENT == null) {
-                synchronized (INSECURE_LOCK) {
-                    if (INSECURE_CLIENT == null) INSECURE_CLIENT = buildInsecureClient();
-                }
-            }
-            this.httpClient = INSECURE_CLIENT;
-        } else {
-            this.httpClient = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofMillis(DEFAULT_TIMEOUT_MS))
-                    .build();
-        }
+        this(session, SaasConfig.fromEnv(), null);
     }
 
-    private static HttpClient buildInsecureClient() {
-        try {
-            TrustManager[] trustAll = {
-                new X509TrustManager() {
-                    public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-                    public void checkClientTrusted(X509Certificate[] c, String a) {}
-                    public void checkServerTrusted(X509Certificate[] c, String a) {}
-                }
-            };
-            SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, trustAll, new SecureRandom());
-            return HttpClient.newBuilder()
-                    .sslContext(ctx)
-                    .connectTimeout(Duration.ofMillis(DEFAULT_TIMEOUT_MS))
-                    .build();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create insecure SSL HttpClient", e);
-        }
+    HumifortisRiskEvaluator(KeycloakSession session, SaasConfig config, HumifortisTransport transport) {
+        this.session = session;
+        this.config  = config;
+        this.transport = transport != null ? transport : HumifortisTransport.shared(config);
+        this.gson    = new GsonBuilder().disableHtmlEscaping().create();
+        this.userContextExtractor = new UserContextExtractor();
     }
 
     // =========================================================================
@@ -137,90 +99,119 @@ public class HumifortisRiskEvaluator {
      * @param flowId  Keycloak root auth session ID (code_id) — may be null for non-browser flows.
      */
     public Risk evaluate(RealmModel realm, UserModel knownUser, String flowId) {
-        if (knownUser == null) {
-            logger.warnf("[HumifortisRiskEvaluator] User is null — fail open");
-            return failOpen();
-        }
-        if (isCircuitOpen()) {
-            logger.debugf("[HumifortisRiskEvaluator] Circuit OPEN — fail open");
-            return failOpen();
-        }
+        return evaluateDetailed(realm, knownUser, flowId).risk();
+    }
 
-        String apiUrl   = envOrDefault(ENV_API_URL, DEFAULT_API_URL);
-        String apiKey   = System.getenv(ENV_API_KEY);
-        int    timeout  = parseTimeout(System.getenv(ENV_TIMEOUT_MS));
-        String tenantId = envOrDefault(ENV_TENANT_ID, realm.getName());
+    /**
+     * Asks Humifortis for the decision. Never throws and never waits longer than the evaluate
+     * budget (retries included). Without an answer, the result carries no decision and says
+     * why ({@link EvaluationResult#fallbackReason()}): the authenticator applies the fallback policy.
+     */
+    /** A person's decision outside a browser flow (the token stages); null when Humifortis did not answer. */
+    public EvaluateResponse decisionFor(RealmModel realm, UserModel user, String flowId) {
+        return evaluateDetailed(realm, user, flowId, false).decision();
+    }
+
+    EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId) {
+        return evaluateDetailed(realm, knownUser, flowId, DecisionSource.isLocal());
+    }
+
+    /** As above; {@code local} asks the server for the evaluation context (HUMIFORTIS_DECISION_SOURCE=local). */
+    EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId, boolean local) {
+        return evaluateDetailed(realm, knownUser, flowId, local, EVENT_CREDENTIAL_VERIFIED);
+    }
+
+    /** As above, for the authentication event {@code eventType} (a reused session is not a credential check). */
+    EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId, boolean local, String eventType) {
+        return evaluateDetailed(realm, knownUser, flowId, local, eventType, null);
+    }
+
+    /** A person's decision for a touch of an artefact already issued (a refresh, a reused session); null when Humifortis did not answer. */
+    public EvaluateResponse decisionFor(RealmModel realm, UserModel user, String flowId, String eventType, StageContext stage) {
+        return evaluateDetailed(realm, user, flowId, false, eventType, stage).decision();
+    }
+
+    /** As above, with what the stage knows about the touch ({@code stage} is null for a browser sign-in). */
+    EvaluationResult evaluateDetailed(RealmModel realm, UserModel knownUser, String flowId, boolean local, String eventType, StageContext stage) {
+        if (knownUser == null) {
+            logger.warnf("[HumifortisRiskEvaluator] User is null — fallback");
+            return EvaluationResult.fallback("null_user");
+        }
+        String tenantId = config.tenantIdOr(realm.getName());
         String entityId = buildEntityId(realm, knownUser);
 
-        if (apiKey == null || apiKey.isBlank()) {
-            logger.warnf("[HumifortisRiskEvaluator] API key missing (entity=%s) — fail open", entityId);
-            return failOpen();
+        if (!config.hasApiKey()) {
+            misconfigLog.error(logger, "[Humifortis] HUMIFORTIS_API_KEY is not set — logins are not evaluated (fallback policy applies)");
+            return EvaluationResult.fallback("missing_api_key");
+        }
+        if (!config.isEndpointAllowed()) {
+            misconfigLog.error(logger, "[Humifortis] HUMIFORTIS_API_URL must be https:// (got " + config.getApiUrl()
+                    + ") — logins are not evaluated (fallback policy applies)");
+            return EvaluationResult.fallback("insecure_url");
         }
 
-        boolean insecureSsl = "true".equalsIgnoreCase(System.getenv("INSECURE_SSL"));
-        if (!apiUrl.toLowerCase(Locale.ROOT).startsWith("https://") && !insecureSsl) {
-            logger.warnf("[HumifortisRiskEvaluator] Non-HTTPS URL (entity=%s) — fail open", entityId);
-            return failOpen();
-        }
-
+        // one id per decision: a retry the server already processed is answered, never re-scored
+        String callId = UUID.randomUUID().toString();
+        String body;
         try {
-            // Build payload
             EventPayload event = new EventPayload();
+            event.event_id    = callId;
             event.entity_id   = entityId;
             event.entity_type = "user"; // must match entity_type sent by HumifortisEventListener so /evaluate reads the same Redis risk key as /events
-            event.event_type  = "auth_credential_verified"; // credentials confirmed; session NOT yet established
+            event.event_type  = eventType; // by default: credentials confirmed, session NOT yet established
+            event.source      = "keycloak"; // provenance of every extracted feature (same as HumifortisEventListener)
             event.timestamp   = Instant.now().toString();
             event.flow_id     = flowId; // propagate Keycloak auth session id — groups with enforcement events
             event.metadata    = buildMetadata(realm, knownUser);
+            applyStage(event.metadata, stage);
+            // the other live sessions of the person: judged for their diversity, never for their number (P20)
+            if (!EVENT_SESSION_REUSED.equals(eventType)) {
+                tech.humifortis.keycloak.user.LiveSessions.writeTo(session, realm, knownUser,
+                        stage != null ? stage.currentSessionId() : null, meta2(event.metadata));
+            }
 
             EvaluateRequestPayload payload = new EvaluateRequestPayload();
             payload.event             = event;
             payload.available_methods = detectAvailableMethods(knownUser);
-
-            String url = apiUrl + "/evaluate";
-            logger.debugf("[HumifortisRiskEvaluator] POST %s entity=%s", url, entityId);
-
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .header("Accept",       "application/json")
-                    .header("Content-Type", "application/json")
-                    .header("X-API-Key",    apiKey)
-                    .header("X-Tenant-ID",  tenantId)
-                    .timeout(Duration.ofMillis(timeout))
-                    .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload)))
-                    .build();
-
-            HttpResponse<String> response =
-                    httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-
-            int status = response.statusCode();
-            logger.debugf("[HumifortisRiskEvaluator] HTTP %d", status);
-
-            if (status < 200 || status >= 300) {
-                logger.warnf("[HumifortisRiskEvaluator] HTTP error %d (entity=%s) — fail open",
-                        status, entityId);
-                recordFailure();
-                return failOpen();
-            }
-
-            EvaluateResponse decision = gson.fromJson(response.body(), EvaluateResponse.class);
-            LAST_DECISION.set(decision);
-            recordSuccess();
-
-            String riskLevel = decision.risk_level != null ? decision.risk_level : "MINIMAL";
-            String reason    = buildReason(decision);
-
-            logger.debugf("[HumifortisRiskEvaluator] level=%s action=%s rule=%s score=%.1f",
-                    riskLevel, decision.action, decision.playbook_rule, decision.risk_score);
-
-            return mapRiskLevel(riskLevel, reason);
-
-        } catch (Exception e) {
-            logger.warnf("[HumifortisRiskEvaluator] Exception (entity=%s): %s",
-                    entityId, e.getMessage());
-            recordFailure();
-            return failOpen();
+            body = gson.toJson(payload);
+        } catch (RuntimeException e) {
+            logger.warnf("[HumifortisRiskEvaluator] payload build failed (entity=%s): %s", entityId, e.getMessage());
+            return EvaluationResult.fallback("error");
         }
+
+        HumifortisTransport.Result result = transport.send(
+                HumifortisTransport.jsonPost(config, DecisionSource.evaluatePath(local), tenantId, body),
+                RetryPolicy.evaluate(config), callId);
+        if (!result.ok()) {
+            String reason = result.failure().reason();
+            failureLog.warn(logger, "[Humifortis] no decision from the API (" + reason
+                    + (result.status() > 0 ? ", HTTP " + result.status() : "") + ", attempts=" + result.attempts()
+                    + ") — fallback policy applies");
+            return EvaluationResult.fallback(reason);
+        }
+
+        EvaluateResponse decision;
+        try {
+            decision = gson.fromJson(result.body(), EvaluateResponse.class);
+        } catch (RuntimeException e) {
+            logger.warnf("[HumifortisRiskEvaluator] unreadable decision (entity=%s): %s", entityId, e.getMessage());
+            return EvaluationResult.fallback("error");
+        }
+        if (decision == null) return EvaluationResult.fallback("error");
+        FallbackPolicy.remember(tenantId, decision.fallback_policy, decision.mode);
+
+        String riskLevel = decision.risk_level != null ? decision.risk_level : "MINIMAL";
+        String reason    = buildReason(decision);
+        logger.debugf("[HumifortisRiskEvaluator] level=%s action=%s rule=%s score=%.1f",
+                riskLevel, decision.action, decision.playbook_rule, decision.risk_score);
+        return new EvaluationResult(mapRiskLevel(riskLevel, reason), decision, null);
+    }
+
+    static boolean isAllowedEndpoint(String apiUrl, String allowInsecureHttp) {
+        if (apiUrl == null || apiUrl.isBlank()) return false;
+        if (apiUrl.toLowerCase(Locale.ROOT).startsWith("https://")) return true;
+        return "true".equalsIgnoreCase(allowInsecureHttp)
+                && apiUrl.toLowerCase(Locale.ROOT).startsWith("http://");
     }
 
     // =========================================================================
@@ -229,11 +220,36 @@ public class HumifortisRiskEvaluator {
 
     private Map<String, Object> buildMetadata(RealmModel realm, UserModel user) {
         Map<String, Object> meta = new HashMap<>();
+        UserContextSnapshot userContext = userContextExtractor.extract(session, realm, user);
 
-        // IP address — real client IP after nginx real_ip_module resolves CF-Connecting-IP
+        // Client IP as Keycloak resolved it (its proxy configuration decides which headers it
+        // believes) — never read from a request header here. How it was resolved goes along.
         safeCollect(meta, "ip", () -> {
             var conn = session.getContext().getConnection();
             return conn != null ? conn.getRemoteAddr() : null;
+        });
+        ProxySettings.current().writeTo(meta::put);
+
+        // The application the user signs in to — per-application access policies scope on it
+        safeCollect(meta, "client_id", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return as != null && as.getClient() != null ? as.getClient().getClientId() : null;
+        });
+        // the protocol of the sign-in (openid-connect | saml), as Keycloak names it on its own events (auth_method)
+        safeCollect(meta, "auth_method", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            String protocol = as != null ? as.getProtocol() : null;
+            return protocol != null && !protocol.isBlank() ? protocol : null;
+        });
+        safeCollect(meta, "client_name", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            String name = as != null && as.getClient() != null ? as.getClient().getName() : null;
+            return name != null && !name.isBlank() ? truncate(name, 255) : null;
+        });
+        safeCollect(meta, "redirect_uri", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            String uri = as != null ? as.getRedirectUri() : null;
+            return uri != null && !uri.isBlank() ? truncate(uri, 1024) : null;
         });
 
         // Cloudflare geo-country (free, instant, available when CF is the proxy).
@@ -257,6 +273,21 @@ public class HumifortisRiskEvaluator {
             return (ua != null && !ua.isBlank()) ? ua : null;
         });
 
+        // Round trip time: the edge's (X-Edge-RTT-Ms), else the browser's (device collector). Absent: not evaluated.
+        try {
+            var as = session.getContext().getAuthenticationSession();
+            EdgeRtt.Measure rtt = EdgeRtt.resolve(session.getContext().getRequestHeaders(),
+                    as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_RTT_MS) : null);
+            if (rtt != null) {
+                meta.put(EdgeRtt.METADATA_KEY, rtt.ms());
+                meta.put(EdgeRtt.SOURCE_KEY, rtt.source());
+            }
+            Integer browser = EdgeRtt.browser(as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_RTT_MS) : null);
+            if (browser != null) meta.put(EdgeRtt.BROWSER_KEY, browser);
+        } catch (RuntimeException e) {
+            logger.debugf("[HumifortisRiskEvaluator] RTT unavailable: %s", e.getMessage());
+        }
+
         // Auth session data
         safeCollect(meta, "session_id", () -> {
             var as = session.getContext().getAuthenticationSession();
@@ -264,11 +295,29 @@ public class HumifortisRiskEvaluator {
                     ? as.getParentSession().getId() : null;
         });
 
-        safeCollect(meta, "identity_provider", () -> {
-            var as = session.getContext().getAuthenticationSession();
-            String idp = as != null ? as.getAuthNote("identity_provider") : null;
-            return (idp != null && !idp.isBlank()) ? idp : "local";
+        safeCollect(meta, "identity_provider", () -> BrokerContext.identityProvider(session.getContext().getAuthenticationSession()));
+        // a brokered sign-in says whether it is the first one (true / false); a sign-in through the realm's own form has no
+        // provider, so the question does not apply and the value is absent
+        // the assurance level the request asks for (RFC 9470 acr_values), so the factor that reaches it is decided (P13)
+        safeCollect(meta, "requested_assurance_level", () -> {
+            int level = AssuranceLevel.requested(session.getContext().getAuthenticationSession());
+            return level > 0 ? level : null;
         });
+        // outside signals (P15), each off without its setting and fail-open: the number changed hands, the device is compliant
+        safeCollect(meta, "sim_swapped_recently", () -> tech.humifortis.keycloak.external.ExternalSignals.shared()
+                .simSwappedRecently(SmsGateway.phoneOf(user, System.getenv())));
+        safeCollect(meta, "device_posture", () -> {
+            var as = session.getContext().getAuthenticationSession();
+            return tech.humifortis.keycloak.external.ExternalSignals.shared().devicePosture(
+                    as != null ? as.getAuthNote(HumifortisDeviceCollectorAuthenticator.NOTE_DEVICE_ID) : null);
+        });
+        safeCollect(meta, "first_broker_login", () -> BrokerContext.firstBrokerLoginOf(session.getContext().getAuthenticationSession()));
+        // what the provider sign-in meant for the account (P5, P4, P22): an existing account linked at this first sign-in, whether the
+        // realm trusts the provider's e-mail, whether the provider asserted a multi-factor sign-in, every provider the account is linked to
+        safeCollect(meta, "broker_account_linked", () -> BrokerContext.accountLinkedOf(session.getContext().getAuthenticationSession()));
+        safeCollect(meta, "idp_email_trusted", () -> BrokerContext.emailTrustedOf(session.getContext().getAuthenticationSession(), realm));
+        safeCollect(meta, "idp_asserted_mfa", () -> BrokerContext.assertedMfaOf(session.getContext().getAuthenticationSession()));
+        safeCollect(meta, "linked_identity_providers", () -> BrokerContext.linkedProvidersOf(session, realm, user));
 
         // Device signals — collected by HumifortisDeviceCollectorAuthenticator (step before this one)
         safeCollect(meta, "device_id", () -> {
@@ -390,54 +439,31 @@ public class HumifortisRiskEvaluator {
         });
 
         // User attributes
-        if (user.getUsername() != null) meta.put("username", user.getUsername());
-        if (user.getEmail()    != null) meta.put("email",    user.getEmail());
+        if (userContext.username() != null) meta.put("username", userContext.username());
+        if (userContext.email()    != null) meta.put("email",    userContext.email());
 
-        // email_verified — required for EMAIL_OTP safety (unverified email is attackable)
-        meta.put("email_verified", String.valueOf(user.isEmailVerified()));
-
-        // mfa_methods — enrolled methods as comma-separated string for feature engine
-        // (distinct from available_methods which includes EMAIL_OTP derived from email_verified)
-        safeCollect(meta, "mfa_methods", () -> {
-            List<String> methods = new ArrayList<>();
-            user.credentialManager().getStoredCredentialsStream().forEach(c -> {
-                switch (c.getType()) {
-                    case "otp"                   -> methods.add("TOTP");
-                    case "webauthn"              -> methods.add("WEBAUTHN");
-                    case "webauthn-passwordless" -> methods.add("WEBAUTHN_PASSWORDLESS");
-                }
-            });
-            return methods.isEmpty() ? null : String.join(",", methods);
-        });
-
-        safeCollect(meta, "account_age_days", () -> {
-            if (user.getCreatedTimestamp() == null) return null;
-            return String.valueOf(ChronoUnit.DAYS.between(
-                    Instant.ofEpochMilli(user.getCreatedTimestamp()), Instant.now()));
-        });
-
-        safeCollect(meta, "user_roles", () -> {
-            List<String> roles = user.getRoleMappingsStream()
-                    .map(r -> r.getName()).toList();
-            if (roles.isEmpty()) return null;
-            meta.put("is_privileged",
-                    String.valueOf(roles.stream().anyMatch(this::isPrivilegedRole)));
-            return String.join(",", roles);
-        });
-
-        safeCollect(meta, "mfa_enrolled", () -> {
-            boolean hasMfa = user.credentialManager().getStoredCredentialsStream()
-                    .anyMatch(c -> "otp".equals(c.getType())
-                            || "webauthn".equals(c.getType())
-                            || "webauthn-passwordless".equals(c.getType()));
-            return String.valueOf(hasMfa);
-        });
-
-        safeCollect(meta, "active_session_count", () ->
-                String.valueOf(session.sessions().getUserSessionsStream(realm, user).count()));
+        // identity: effective roles, groups, privilege (and why), account creation, sessions
+        userContext.writeTo(meta::put);
 
         meta.put("realm", realm.getName());
         return meta;
+    }
+
+    /** Adds what the stage knows and, for a request that is not the person's own, takes the network of the request out. */
+    static void applyStage(Map<String, Object> metadata, StageContext stage) {
+        if (stage == null) return;
+        if (!stage.personNetwork()) {
+            for (String key : StageContext.NETWORK_KEYS) metadata.remove(key);
+        }
+        if (stage.extra() != null) {
+            stage.extra().forEach((k, v) -> {
+                if (v != null && !v.isBlank()) metadata.put(k, v);
+            });
+        }
+    }
+
+    private static java.util.function.BiConsumer<String, String> meta2(Map<String, Object> metadata) {
+        return metadata::put;
     }
 
     /** Helper: runs collector, silently skips on exception or null result. */
@@ -451,48 +477,22 @@ public class HumifortisRiskEvaluator {
         }
     }
 
+    /**
+     * The factors this person can answer a step-up with: her enrolled credentials, the email code when her email is
+     * verified, the text message when she has a number and a gateway is configured. A person with none is announced as
+     * EMAIL_OTP, so that the router explains the refusal (no verified email) rather than the decision being unresolvable.
+     */
     private List<String> detectAvailableMethods(UserModel user) {
-        List<String> methods = new ArrayList<>();
         try {
-            user.credentialManager().getStoredCredentialsStream().forEach(cred -> {
-                switch (cred.getType()) {
-                    case "otp"                   -> methods.add("TOTP");
-                    case "webauthn"              -> methods.add("WEBAUTHN");
-                    case "webauthn-passwordless" -> methods.add("WEBAUTHN_PASSWORDLESS");
-                }
-            });
+            List<String> methods = new ArrayList<>(userContextExtractor.extractMfaMethods(user));
+            boolean email = user.isEmailVerified() && user.getEmail() != null && !user.getEmail().isBlank();
+            if (email && !methods.contains("EMAIL_OTP")) methods.add("EMAIL_OTP");
+            if (SmsGateway.canText(user) && !methods.contains("SMS_OTP")) methods.add("SMS_OTP");
+            if (methods.isEmpty()) methods.add("EMAIL_OTP");
+            return methods;
         } catch (Exception e) {
             logger.debugf("[HumifortisRiskEvaluator] MFA methods detection failed: %s", e.getMessage());
-        }
-        if (methods.isEmpty()) methods.add("EMAIL_OTP");
-        return methods;
-    }
-
-    private boolean isPrivilegedRole(String name) {
-        return name != null && Set.of(
-                "admin", "realm-admin", "manage-users", "manage-realm",
-                "manage-clients", "manage-identity-providers", "impersonation",
-                "create-realm", "manage-authorization"
-        ).contains(name);
-    }
-
-    // =========================================================================
-    // CIRCUIT BREAKER
-    // =========================================================================
-
-    private static boolean isCircuitOpen() {
-        if (consecutiveFailures < CIRCUIT_OPEN_THRESHOLD) return false;
-        return System.currentTimeMillis() <= circuitOpenUntil;
-    }
-
-    private static void recordSuccess() { consecutiveFailures = 0; }
-
-    private static void recordFailure() {
-        consecutiveFailures++;
-        if (consecutiveFailures >= CIRCUIT_OPEN_THRESHOLD) {
-            circuitOpenUntil = System.currentTimeMillis() + CIRCUIT_OPEN_DURATION_MS;
-            logger.warnf("[HumifortisRiskEvaluator] Circuit OPENED — %d failures, retry in %dms",
-                    consecutiveFailures, CIRCUIT_OPEN_DURATION_MS);
+            return List.of("EMAIL_OTP");
         }
     }
 
@@ -529,7 +529,7 @@ public class HumifortisRiskEvaluator {
     // =========================================================================
 
     // Package-private so HumifortisStepUpRouter can build entity IDs without duplication.
-    static String buildEntityId(RealmModel realm, UserModel user) {
+    public static String buildEntityId(RealmModel realm, UserModel user) {
         // Standard entity_id format: user:keycloak:{realmName}:{keycloakUserUUID}
         // This matches exactly what E2E tests use via ENV.USERS.alice.entityId and
         // what the risk engine stores risk state under — ensuring consistent Redis keys
@@ -637,66 +637,50 @@ public class HumifortisRiskEvaluator {
      * @param tenantId           Humifortis tenant ID (from env var or realm name)
      * @param deviceId           Stable FingerprintJS visitorId — when provided, ensures one
      *                           trusted_devices row per physical device (token rotates on MFA).
-     *                           When null/empty, legacy behaviour: one row per token.
+     *                           Required: a trust is bound to the device it was issued to, so a token
+     *                           without a device identifier is not registered (the browser is simply not
+     *                           remembered and the step-up is asked again).
      * @param deviceName         Human-readable label, e.g. "Desktop-Chrome-149, macOS 10.15"
      * @param platform           OS family, e.g. "macOS"
      * @param ipAddress          End-user IP at trust time
      */
     public void registerTrustTokenAsync(String canonicalEntityId, String tokenHash, String tenantId,
                                         String deviceId, String deviceName, String platform, String ipAddress) {
-        String apiUrl = envOrDefault(ENV_API_URL, DEFAULT_API_URL);
-        String apiKey = System.getenv(ENV_API_KEY);
-        if (apiKey == null || apiKey.isBlank()) {
+        if (!config.hasApiKey()) {
             logger.warnf("[HumifortisRiskEvaluator] registerTrustToken: API key missing");
             return;
         }
-        java.util.function.Function<String,String> esc = s -> s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
-        String body = "{\"entity_id\":\"" + esc.apply(canonicalEntityId) +
-                      "\",\"token_hash\":\"" + tokenHash +
-                      "\",\"ttl_days\":30" +
-                      (deviceId != null && !deviceId.isBlank()
-                          ? ",\"device_id\":\"" + esc.apply(deviceId) + "\"" : "") +
-                      (deviceName != null && !deviceName.isBlank()
-                          ? ",\"device_name\":\"" + esc.apply(deviceName) + "\"" : "") +
-                      (platform != null && !platform.isBlank()
-                          ? ",\"platform\":\"" + esc.apply(platform) + "\"" : "") +
-                      (ipAddress != null && !ipAddress.isBlank()
-                          ? ",\"ip_address\":\"" + esc.apply(ipAddress) + "\"" : "") +
-                      "}";
-        String url = apiUrl + "/devices/trust";
-
-        try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .header("Content-Type", "application/json")
-                    .header("X-API-Key",    apiKey)
-                    .header("X-Tenant-ID",  tenantId)
-                    .timeout(Duration.ofMillis(DEFAULT_TIMEOUT_MS))
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                    .build();
-            java.util.concurrent.CompletableFuture.runAsync(() -> {
-                try {
-                    HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-                    if (resp.statusCode() == 201) {
-                        logger.infof("[HumifortisRiskEvaluator] Browser token registered for entity=%s",
-                                canonicalEntityId);
-                    } else {
-                        logger.warnf("[HumifortisRiskEvaluator] registerTrustToken HTTP %d: %s",
-                                resp.statusCode(), resp.body());
-                    }
-                } catch (Exception e) {
-                    logger.warnf("[HumifortisRiskEvaluator] registerTrustToken async failed: %s",
-                            e.getMessage());
-                }
-            });
-        } catch (Exception e) {
-            logger.warnf("[HumifortisRiskEvaluator] registerTrustToken setup failed: %s", e.getMessage());
+        if (isBlank(deviceId)) {
+            logger.debugf("[HumifortisRiskEvaluator] registerTrustToken: no device identifier, the browser is not remembered (entity=%s)", canonicalEntityId);
+            return;
         }
+        TrustTokenPayload payload = new TrustTokenPayload();
+        payload.entity_id = canonicalEntityId;
+        payload.token_hash = tokenHash;
+        payload.ttl_days = 30;
+        payload.device_id = deviceId;
+        payload.device_name = isBlank(deviceName) ? null : deviceName;
+        payload.platform = isBlank(platform) ? null : platform;
+        payload.ip_address = isBlank(ipAddress) ? null : ipAddress;
+        String body = gson.toJson(payload);
+        String key = UUID.randomUUID().toString();
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            HumifortisTransport.Result r = transport.send(
+                    HumifortisTransport.jsonPost(config, "/devices/trust", tenantId, body), RetryPolicy.events(config), key);
+            if (r.ok()) {
+                logger.infof("[HumifortisRiskEvaluator] Browser token registered for entity=%s", canonicalEntityId);
+            } else {
+                logger.warnf("[HumifortisRiskEvaluator] registerTrustToken failed: %s HTTP %d", r.failure().reason(), r.status());
+            }
+        });
     }
 
-    private static int parseTimeout(String raw) {
-        if (raw == null || raw.isBlank()) return DEFAULT_TIMEOUT_MS;
-        try { return Integer.parseInt(raw); } catch (NumberFormatException e) { return DEFAULT_TIMEOUT_MS; }
+    private static String truncate(String value, int max) {
+        return value.length() <= max ? value : value.substring(0, max);
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     // =========================================================================
@@ -706,12 +690,24 @@ public class HumifortisRiskEvaluator {
     private static class EvaluateRequestPayload {
         public EventPayload event;
         public List<String> available_methods;
+        /** What the caller carries out for this request beyond the entity type's executed actions. */
+        public List<String> executors;
+        /** Actions the caller could carry out but does not for this request, with why (DISABLE_CLIENT: client_not_opted_in). */
+        public Map<String, String> declined_executors;
+    }
+
+    /** A decided action that was not carried out, and why (core's closed set of reasons). */
+    public static class NotEnforcedItem {
+        public String action;
+        public String reason;
     }
 
     private static class EventPayload {
+        public String              event_id;  // idempotency: every retry of one decision carries the same id
         public String              entity_id;
         public String              entity_type;
         public String              event_type;
+        public String              source;
         public String              timestamp;
         public String              flow_id;   // Keycloak auth session id — groups all events of one login attempt
         public Map<String, Object> metadata;
@@ -731,6 +727,13 @@ public class HumifortisRiskEvaluator {
         public List<String> actions;
         @SerializedName("playbook_rule")        public String       playbook_rule;
         @SerializedName("enforced_action")      public String       enforced_action;
+        /** The factor Humifortis decided a step-up is answered with; the router challenges it and never chooses one. */
+        @SerializedName("required_factor")      public String       required_factor;
+        /** The weakest kind of WebAuthn credential the step-up accepts (empty: any); the router refuses a weaker one. */
+        @SerializedName("required_factor_kind") public String       required_factor_kind;
+        @SerializedName("required_assurance")   public int          required_assurance;
+        @SerializedName("achieved_assurance")   public int          achieved_assurance;
+        @SerializedName("assurance_shortfall")  public boolean      assurance_shortfall;
         @SerializedName("fallback_reason")      public String       fallback_reason;
         @SerializedName("derived_signals")      public List<String> derived_signals;
         @SerializedName("contributing_factors") public List<String> contributing_factors;
@@ -742,6 +745,16 @@ public class HumifortisRiskEvaluator {
         @SerializedName("geo_city")             public String       geo_city;
         /** Enforcement mode: enforce | dry_run | shadow */
         @SerializedName("mode")                 public String       mode;
+        /** The tenant's policy for logins Humifortis cannot answer — cached for the next outage. */
+        @SerializedName("fallback_policy")      public Map<String, String> fallback_policy;
+        /** Who decided: platform | tenant | baseline. */
+        @SerializedName("policy_source")        public String       policy_source;
+        /** The tenant access policy that decided, when one did. */
+        @SerializedName("access_policy")        public String       access_policy;
+        /** The decided action is not carried out by anything (shown, not enforced; enforced_action is ALLOW). */
+        @SerializedName("advisory")             public boolean      advisory;
+        /** The decided actions nothing carried out for this request, each with why: copied verbatim into the report. */
+        @SerializedName("not_enforced")         public List<NotEnforcedItem> not_enforced;
         // ─── Verified-Unblock (admin-initiated step-up) ──────────────────────
         /**
          * Set to REQUIRE_MFA_VERIFICATION when a DENY was downgraded to a step-up MFA
@@ -749,10 +762,97 @@ public class HumifortisRiskEvaluator {
          * risk-based MFA — the connector binds the resulting MFA to the challenge.
          */
         @SerializedName("verification_reason")          public String verification_reason;
-        /** Challenge id to echo back in auth_mfa_success so the server can bind + clear the block. */
+        /** Challenge id to echo back in mfa_challenge_succeeded so the server can bind + clear the block. */
         @SerializedName("verification_challenge_id")    public String verification_challenge_id;
         /** Minimum AAL required to satisfy the challenge (AAL2 default, AAL3 for WebAuthn). */
         @SerializedName("verification_required_level")  public String verification_required_level;
+        /** The evaluation context, present when the request asked for it (HUMIFORTIS_DECISION_SOURCE=local) and the server knows it. */
+        public EvaluationContext context;
+        /** True when this is the original answer of an earlier request with the same event id, not a new decision. */
+        public boolean replayed;
+        /** The person's risk epoch after this decision: the number of changes of her risk level so far (0: none yet). */
+        @SerializedName("risk_epoch") public long risk_epoch;
+    }
+
+    /**
+     * @param fallbackReason why there is no decision (timeout, circuit_open, unreachable,
+     *                       http_5xx, http_4xx, missing_api_key, insecure_url, null_user, error);
+     *                       null when Humifortis answered
+     */
+    /** The answer to a service-account token request: the decision, or why there is none. */
+    public record ServiceAccountResult(EvaluateResponse decision, String fallbackReason) {}
+
+    /**
+     * Asks Humifortis for the decision on a service-account token request (the client's own credentials), before the
+     * token is issued. Never throws, never waits longer than the service-account budget.
+     *
+     * @param flowId    the request's (transient) user-session id: the CLIENT_LOGIN of the request carries it too
+     * @param metadata  the context collected by the executor
+     * @param executors what the caller carries out for this request (e.g. DENY)
+     * @param declined  what it could carry out but does not for this request, with why
+     */
+    public ServiceAccountResult evaluateServiceAccount(RealmModel realm, org.keycloak.models.ClientModel client, String flowId,
+                                                       Map<String, Object> metadata, List<String> executors,
+                                                       Map<String, String> declined) {
+        if (!config.hasApiKey()) return new ServiceAccountResult(null, "missing_api_key");
+        if (!config.isEndpointAllowed()) {
+            misconfigLog.error(logger, "[Humifortis] HUMIFORTIS_API_URL must be https:// (got " + config.getApiUrl()
+                    + ") — service-account token requests are not evaluated (fallback applies)");
+            return new ServiceAccountResult(null, "insecure_url");
+        }
+        String tenantId = config.tenantIdOr(realm.getName());
+        String callId = UUID.randomUUID().toString();
+        String body;
+        try {
+            EventPayload event = new EventPayload();
+            event.event_id    = callId;
+            event.entity_type = tech.humifortis.keycloak.serviceaccount.ClientEntityType.of(client.getAttribute(tech.humifortis.keycloak.serviceaccount.ClientEntityType.ATTR)); // the type the listener sends for CLIENT_LOGIN: same risk key
+            event.entity_id   = tech.humifortis.keycloak.serviceaccount.ClientEntityType.entityId(event.entity_type, realm.getId(), client.getClientId());
+            event.event_type  = "auth_credential_verified"; // the client's credentials are valid; no token yet
+            event.source      = "keycloak";
+            event.timestamp   = Instant.now().toString();
+            event.flow_id     = flowId;
+            event.metadata    = metadata;
+            EvaluateRequestPayload payload = new EvaluateRequestPayload();
+            payload.event     = event;
+            payload.executors = executors;
+            payload.declined_executors = declined == null || declined.isEmpty() ? null : declined;
+            body = gson.toJson(payload);
+        } catch (RuntimeException e) {
+            logger.warnf("[HumifortisRiskEvaluator] service-account payload build failed (client=%s): %s", client.getClientId(), e.getMessage());
+            return new ServiceAccountResult(null, "error");
+        }
+        HumifortisTransport.Result result = transport.send(
+                HumifortisTransport.jsonPost(config, "/evaluate", tenantId, body),
+                RetryPolicy.serviceAccount(config), callId);
+        if (!result.ok()) {
+            String reason = result.failure().reason();
+            failureLog.warn(logger, "[Humifortis] no decision for a service-account token request (" + reason
+                    + (result.status() > 0 ? ", HTTP " + result.status() : "") + ") — fallback applies");
+            return new ServiceAccountResult(null, reason);
+        }
+        try {
+            EvaluateResponse decision = gson.fromJson(result.body(), EvaluateResponse.class);
+            return decision != null ? new ServiceAccountResult(decision, null) : new ServiceAccountResult(null, "error");
+        } catch (RuntimeException e) {
+            logger.warnf("[HumifortisRiskEvaluator] unreadable service-account decision (client=%s): %s", client.getClientId(), e.getMessage());
+            return new ServiceAccountResult(null, "error");
+        }
+    }
+
+    record EvaluationResult(Risk risk, EvaluateResponse decision, String fallbackReason) {
+        static EvaluationResult fallback(String reason) {
+            return new EvaluationResult(failOpen(), null, reason);
+        }
+    }
+
+    private static class TrustTokenPayload {
+        String entity_id;
+        String token_hash;
+        int ttl_days;
+        String device_id;
+        String device_name;
+        String platform;
+        String ip_address;
     }
 }
-

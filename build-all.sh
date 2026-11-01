@@ -8,14 +8,14 @@
 #   ./build-all.sh --java-only       # rebuild Java JAR only
 #
 # Output:
-#   humifortis-keycloak-connector.jar        ← deploy to Keycloak providers/
-#   dist-theme/js/humifortis-device.bundle.js ← deploy to theme login/resources/js/
+#   src/main/resources/theme-resources/resources/js/humifortis-device.bundle.js
+#                                            ← written by vite, packaged into the jar
+#   target/humifortis-keycloak-connector.jar ← deploy to Keycloak providers/
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UI_DIR="$SCRIPT_DIR/device-collector-ui"
-THEME_JS_OUT="$SCRIPT_DIR/dist-theme/js"
 
 BUILD_JAVA=true
 BUILD_JS=true
@@ -44,9 +44,7 @@ if [ "$BUILD_JS" = true ]; then
 
   npm run build
 
-  mkdir -p "$THEME_JS_OUT"
-  cp dist/humifortis-device.bundle.js "$THEME_JS_OUT/"
-  echo "  ✅ JS bundle → dist-theme/js/humifortis-device.bundle.js"
+  echo "  ✅ JS bundle → src/main/resources/theme-resources/resources/js/humifortis-device.bundle.js"
   cd "$SCRIPT_DIR"
 fi
 
@@ -63,16 +61,8 @@ echo ""
 echo "======================================================="
 echo "  Build complete!"
 echo ""
-echo "  Deploy:"
-echo "  1. cp target/humifortis-keycloak-connector.jar \\"
-echo "        /opt/keycloak/providers/"
-echo ""
-echo "  2. cp dist-theme/js/humifortis-device.bundle.js \\"
-echo "        /opt/keycloak/themes/<your-theme>/login/resources/js/"
-echo ""
-echo "  3. cp src/main/resources/theme-resources/templates/humifortis-device-collector.ftl \\"
-echo "        /opt/keycloak/themes/<your-theme>/login/"
-echo ""
-echo "  4. Restart Keycloak"
+echo "  Deploy: copy target/humifortis-keycloak-connector.jar to /opt/keycloak/providers/"
+echo "          and restart Keycloak (see INSTALLATION.md for the flow and the optional"
+echo "          one-line login theme setting)."
 echo "======================================================="
 

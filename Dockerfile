@@ -8,14 +8,15 @@
 #
 # Run:
 #   docker run -p 8080:8080 \
-#     -e KEYCLOAK_ADMIN=admin \
-#     -e KEYCLOAK_ADMIN_PASSWORD=admin \
+#     -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+#     -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
 #     -e HUMIFORTIS_API_KEY=humi_kc_prod_xxx \
 #     humifortis start-dev
 #
 # See DOCKER.md for full configuration and production notes.
 
-ARG KEYCLOAK_VERSION=23.0.3
+# Keep in sync with <keycloak.version> in pom.xml.
+ARG KEYCLOAK_VERSION=26.8.1
 
 ########################################
 # Stage 1 — build the connector JAR
@@ -28,10 +29,8 @@ WORKDIR /build
 COPY pom.xml .
 RUN mvn -B -q dependency:go-offline || true
 
-# Java sources + the prebuilt device-collector UI bundle (checked into git,
-# consumed by the maven-resources-plugin copy-js-bundle execution).
+# Java sources; the device-collector JS bundle is committed under src/main/resources.
 COPY src ./src
-COPY device-collector-ui ./device-collector-ui
 
 RUN mvn -B -q clean package -DskipTests
 
@@ -42,7 +41,7 @@ FROM quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}
 
 LABEL org.opencontainers.image.title="humifortis" \
       org.opencontainers.image.description="Keycloak with the Humifortis risk-based auth connector preinstalled" \
-      org.opencontainers.image.source="https://github.com/humifortis/keycloak-connector" \
+      org.opencontainers.image.source="https://github.com/humifortis/humifortis-keycloak-connector" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 COPY --from=builder /build/target/humifortis-keycloak-connector.jar /opt/keycloak/providers/humifortis-keycloak-connector.jar

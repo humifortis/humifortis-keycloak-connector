@@ -13,7 +13,7 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 ### Reporting Bugs
 
-1. Check if the bug has already been reported in [GitHub Issues](https://github.com/humifortis/keycloak-connector/issues)
+1. Check if the bug has already been reported in [GitHub Issues](https://github.com/humifortis/humifortis-keycloak-connector/issues)
 2. If not, create a new issue with:
    - Clear title and description
    - Steps to reproduce
@@ -77,7 +77,7 @@ cp target/humifortis-keycloak-connector.jar /opt/keycloak/providers/
 ### Testing
 
 - Write unit tests for new functionality
-- Test with multiple Keycloak versions (22.x, 23.x, 24.x)
+- Test with multiple Keycloak versions (26.8.1 is the supported version)
 - Verify integration with Humifortis SaaS
 - Test error handling and edge cases
 
