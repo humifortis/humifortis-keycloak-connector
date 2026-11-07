@@ -109,7 +109,7 @@ public final class TokenRiskStage {
             }
             try {
                 EventQueue.shared(config).submit(DecisionReport.build(
-                        d != null ? DecisionReport.DECISION_ENFORCED : DecisionReport.FALLBACK_APPLIED,
+                        d != null ? DecisionReport.DECISION_ENFORCED : DecisionReport.FALLBACK_APPLIED, d != null ? d.record_id : null,
                         HumifortisRiskEvaluator.buildEntityId(realm, user), DecisionReport.USER, flowId, realm.getName(),
                         v.requested(), v.applied(), v.mode(), extra));
             } catch (RuntimeException e) {

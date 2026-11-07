@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.LongSupplier;
 import java.util.function.LongUnaryOperator;
+import java.util.function.UnaryOperator;
 
 import org.jboss.logging.Logger;
 
@@ -67,12 +68,21 @@ public final class HumifortisTransport {
     private final Sleeper sleeper;
     private final LongUnaryOperator random;
 
+    /** Replaces an access token the API refused: the new token, or null when there is none (see {@link TokenSource#renew}). */
+    private final UnaryOperator<String> renewToken;
+
     public HumifortisTransport(Sender sender, CircuitBreaker breaker, LongSupplier clock, Sleeper sleeper, LongUnaryOperator random) {
+        this(sender, breaker, clock, sleeper, random, TokenSource::renewShared);
+    }
+
+    public HumifortisTransport(Sender sender, CircuitBreaker breaker, LongSupplier clock, Sleeper sleeper, LongUnaryOperator random,
+                               UnaryOperator<String> renewToken) {
         this.sender = sender;
         this.breaker = breaker;
         this.clock = clock;
         this.sleeper = sleeper;
         this.random = random;
+        this.renewToken = renewToken;
     }
 
     /** The transport of this endpoint, shared process-wide. */
@@ -124,18 +134,32 @@ public final class HumifortisTransport {
         int lastStatus = 0;
         String lastBody = null;
         int attempts = 0;
+        boolean renewed = false;
         for (int attempt = 0; attempt < policy.maxAttempts(); attempt++) {
             long remaining = deadline - clock.getAsLong();
             if (remaining < RetryPolicy.MIN_ATTEMPT_MS) break;
             attempts++;
             long retryAfterMs = 0;
             try {
-                Response r = sender.send(request.timeout(Duration.ofMillis(Math.min(policy.attemptTimeoutMs(), remaining))).build());
+                HttpRequest sent = request.timeout(Duration.ofMillis(Math.min(policy.attemptTimeoutMs(), remaining))).build();
+                Response r = sender.send(sent);
                 lastStatus = r.status();
                 lastBody = r.body();
                 if (r.status() >= 200 && r.status() < 300) {
                     breaker.onSuccess();
                     return new Result(r.status(), r.body(), Failure.NONE, attempts);
+                }
+                // an access token refused before it ended (its signing key was retired): renew it once and send again at once,
+                // so a key rotation never leaves the connector refused until its token expires
+                if (r.status() == 401 && !renewed) {
+                    String bearer = bearerOf(sent);
+                    String fresh = bearer == null ? null : renewToken.apply(bearer);
+                    if (fresh != null && !fresh.equals(bearer)) {
+                        renewed = true;
+                        request.setHeader("Authorization", "Bearer " + fresh);
+                        attempt--; // the renewal is not a retry of the call
+                        continue;
+                    }
                 }
                 if (!RetryPolicy.isRetryableStatus(r.status())) {
                     if (r.status() >= 500) {
@@ -173,6 +197,14 @@ public final class HumifortisTransport {
         }
         breaker.onFailure();
         return new Result(lastStatus, lastBody, last, attempts);
+    }
+
+    /** The access token a request carried, or null when it authenticated otherwise. */
+    private static String bearerOf(HttpRequest request) {
+        return request.headers().firstValue("Authorization")
+                .filter(h -> h.regionMatches(true, 0, "Bearer ", 0, 7))
+                .map(h -> h.substring(7).trim())
+                .orElse(null);
     }
 
     /** Retry-After in delta-seconds (HTTP-date is not used by the API). */

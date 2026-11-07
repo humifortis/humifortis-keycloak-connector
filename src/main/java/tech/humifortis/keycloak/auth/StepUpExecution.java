@@ -62,7 +62,7 @@ public final class StepUpExecution {
             extra.put(DIVERGENCE, NOT_EXECUTED);
             String flowId = as.getParentSession() != null ? as.getParentSession().getId() : null;
             HumifortisEvent report = DecisionReport.build(DecisionReport.DECISION_ENFORCED,
-                    HumifortisRiskEvaluator.buildEntityId(realm, user), DecisionReport.USER, flowId, realm.getName(),
+                    as.getAuthNote(HumifortisRiskAuthenticator.NOTE_RECORD_ID), HumifortisRiskEvaluator.buildEntityId(realm, user), DecisionReport.USER, flowId, realm.getName(),
                     requested, "ALLOW", "enforce", extra);
             EventQueue.shared(config).submit(report);
         } catch (RuntimeException e) {

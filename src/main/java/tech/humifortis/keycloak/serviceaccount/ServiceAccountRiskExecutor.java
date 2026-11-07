@@ -83,17 +83,17 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
 
     /** The decision report (replaced in tests). */
     interface Report {
-        void send(String type, String entityId, String flowId, RealmModel realm, String requested, String enforced,
-                  String mode, Map<String, String> extra);
+        void send(String type, String recordId, String entityId, String flowId, RealmModel realm, String requested,
+                  String enforced, String mode, Map<String, String> extra);
     }
 
     public ServiceAccountRiskExecutor(KeycloakSession session) {
         this(session,
                 (realm, client, flowId, md, executors, declined) -> new HumifortisRiskEvaluator(session)
                         .evaluateServiceAccount(realm, client, flowId, md, executors, declined),
-                (type, entityId, flowId, realm, requested, enforced, mode, extra) -> {
+                (type, recordId, entityId, flowId, realm, requested, enforced, mode, extra) -> {
                     SaasConfig config = SaasConfig.fromEnv();
-                    EventQueue.shared(config).submit(DecisionReport.build(type, entityId, entityId.substring(0, entityId.indexOf(':')),
+                    EventQueue.shared(config).submit(DecisionReport.build(type, recordId, entityId, entityId.substring(0, entityId.indexOf(':')),
                             flowId, realm.getName(), requested, enforced, mode, extra));
                 });
     }
@@ -220,7 +220,8 @@ public class ServiceAccountRiskExecutor implements ClientPolicyExecutorProvider<
             }
         }
         try {
-            report.send(d.reportType, entityId, flowId, realm, d.requested, d.enforced, d.mode, extra);
+            report.send(d.reportType, result.decision() != null ? result.decision().record_id : null, entityId, flowId, realm,
+                    d.requested, d.enforced, d.mode, extra);
         } catch (RuntimeException e) {
             LOG.debugf("[Humifortis] service-account decision report failed: %s", e.getMessage());
         }

@@ -13,8 +13,9 @@ import tech.humifortis.keycloak.model.HumifortisEvent;
 class DecisionReportTest {
 
     private static Map<String, Object> report(String requested, String enforced, String mode) {
-        HumifortisEvent e = DecisionReport.build(DecisionReport.DECISION_ENFORCED, "user:keycloak:demo:u1", DecisionReport.USER, "flow-1", "demo",
-                requested, enforced, mode, Map.of("decision_rule", "baseline_medium", "blank", " "));
+        HumifortisEvent e = DecisionReport.build(DecisionReport.DECISION_ENFORCED, "rec-1", "user:keycloak:demo:u1", DecisionReport.USER, "flow-1", "demo",
+                requested, enforced, mode, Map.of("decision_rule", "baseline_medium", "blank", " ", "record_id", "not-this-one"));
+        assertEquals("rec-1", e.getMetadata().get("record_id"), "the record id has one source: the argument");
         assertEquals("decision_enforced", e.getEventType());
         assertEquals("user:keycloak:demo:u1", e.getEntityId());
         assertEquals("flow-1", e.getFlowId());

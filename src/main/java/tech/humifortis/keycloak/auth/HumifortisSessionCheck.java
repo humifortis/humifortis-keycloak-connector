@@ -158,7 +158,7 @@ public class HumifortisSessionCheck implements RequiredActionProvider {
                 type = DecisionReport.FALLBACK_APPLIED;
                 extra.put("fallback_outcome", "ALLOW".equals(applied) ? "allow" : "deny");
             }
-            HumifortisEvent event = DecisionReport.build(type, HumifortisRiskEvaluator.buildEntityId(realm, user),
+            HumifortisEvent event = DecisionReport.build(type, d != null ? d.record_id : null, HumifortisRiskEvaluator.buildEntityId(realm, user),
                     DecisionReport.USER, flowId, realm.getName(), requested, applied, mode, extra);
             EventQueue.shared(config).submit(event);
         } catch (RuntimeException e) {

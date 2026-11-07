@@ -248,4 +248,45 @@ class HumifortisTransportTest {
         assertEquals("k", r.headers().firstValue("X-API-Key").orElseThrow());
         assertEquals("t1", r.headers().firstValue("X-Tenant-ID").orElseThrow());
     }
+
+    @Test
+    void aRefusedTokenIsRenewedOnceAndTheCallSentAgain() {
+        FakeTime time = new FakeTime();
+        Script script = new Script(time, 10, 401, 200);
+        List<String> renewed = new ArrayList<>();
+        HumifortisTransport t = new HumifortisTransport(script, breaker(time), time::millis, time::sleep, bound -> bound / 2,
+                old -> { renewed.add(old); return "fresh"; });
+
+        HumifortisTransport.Result r = t.send(request().header("Authorization", "Bearer stale"), EVALUATE, null);
+
+        assertTrue(r.ok(), "the call succeeds with the renewed token");
+        assertEquals(List.of("stale"), renewed);
+        assertEquals(2, script.requests.size());
+        assertEquals("Bearer fresh", script.requests.get(1).headers().firstValue("Authorization").orElseThrow());
+        assertTrue(time.sleeps.isEmpty(), "sent again at once, not after a backoff");
+    }
+
+    @Test
+    void aSecondRefusalIsTheAnswer_andAKeyIsNeverRenewed() {
+        FakeTime time = new FakeTime();
+        Script twice = new Script(time, 10, 401, 401);
+        AtomicInteger renewals = new AtomicInteger();
+        HumifortisTransport t = new HumifortisTransport(twice, breaker(time), time::millis, time::sleep, bound -> bound / 2,
+                old -> "fresh" + renewals.incrementAndGet());
+        HumifortisTransport.Result r = t.send(request().header("Authorization", "Bearer stale"), EVALUATE, null);
+        assertEquals(401, r.status());
+        assertEquals(1, renewals.get(), "one renewal per call");
+        assertEquals(2, twice.requests.size());
+
+        Script key = new Script(time, 10, 401);
+        HumifortisTransport k = new HumifortisTransport(key, breaker(time), time::millis, time::sleep, bound -> bound / 2,
+                old -> { throw new AssertionError("an API key is not a token"); });
+        assertEquals(401, k.send(request().header("X-API-Key", "hf_x"), EVALUATE, null).status());
+        assertEquals(1, key.requests.size());
+
+        Script none = new Script(time, 10, 401);
+        HumifortisTransport n = new HumifortisTransport(none, breaker(time), time::millis, time::sleep, bound -> bound / 2, old -> null);
+        assertEquals(401, n.send(request().header("Authorization", "Bearer stale"), EVALUATE, null).status(), "no new token: the refusal stands");
+        assertEquals(1, none.requests.size());
+    }
 }

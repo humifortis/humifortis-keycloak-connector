@@ -117,4 +117,11 @@ class HumifortisRiskAuthenticatorTest {
     void appliedAction_noAnswerIsTheFallbackAction() {
         assertEquals("ALLOW", HumifortisRiskAuthenticator.appliedAction(null, "ALLOW"));
     }
+
+    @Test
+    void evaluateResponse_readsTheRecordIdTheReportEchoes() {
+        HumifortisRiskEvaluator.EvaluateResponse d = new com.google.gson.Gson().fromJson(
+                "{\"record_id\":\"6f1c2c1e-1111-4222-8333-944455556666\",\"action\":\"ALLOW\"}", HumifortisRiskEvaluator.EvaluateResponse.class);
+        assertEquals("6f1c2c1e-1111-4222-8333-944455556666", d.record_id);
+    }
 }

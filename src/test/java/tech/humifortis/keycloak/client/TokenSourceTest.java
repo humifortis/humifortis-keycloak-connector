@@ -153,4 +153,19 @@ class TokenSourceTest {
             assertTrue(e.getMessage().contains("pkcs8"));
         }
     }
+
+    @Test
+    void aRefusedTokenIsReplacedAtOnce_onceForEveryoneRefusedWithIt() {
+        AtomicLong now = new AtomicLong(1_000_000);
+        AtomicInteger fetches = new AtomicInteger();
+        TokenSource source = new TokenSource(() -> { fetches.incrementAndGet(); return ok("t" + fetches.get(), 300); }, now::get);
+        assertEquals("t1", source.bearer());
+
+        assertEquals("t2", source.renew("t1"), "the refused token is dropped although it has not ended");
+        assertEquals("t2", source.renew("t1"), "a thread refused with the same token gets the new one");
+        assertEquals(2, fetches.get(), "one fetch for the renewal");
+        assertEquals("t2", source.bearer());
+        assertNull(source.renew("someone-else"), "a token this source never issued is not renewed");
+        assertNull(source.renew(null));
+    }
 }

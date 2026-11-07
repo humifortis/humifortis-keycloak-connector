@@ -236,7 +236,7 @@ class ServiceAccountRiskExecutorTest {
                         declinedSent.add(declined);
                         return result;
                     },
-                    (type, entityId, flowId, r, requested, enforced, mode, extra) -> {
+                    (type, recordId, entityId, flowId, r, requested, enforced, mode, extra) -> {
                         assertEquals("service_account:keycloak:demo:billing-job", entityId);
                         reports.add(new Sent(type, flowId, requested, enforced, mode, extra));
                     });

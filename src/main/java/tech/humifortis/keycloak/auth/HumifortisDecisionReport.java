@@ -77,7 +77,6 @@ public final class HumifortisDecisionReport implements Authenticator {
         extra.put("risk_score", notes.get(ContextNotes.SCORE));
         extra.put("decision_rule", notes.get(ContextNotes.REPORT_RULE));
         extra.put("policy_source", notes.get(ContextNotes.REPORT_SOURCE));
-        extra.put("record_id", notes.get(ContextNotes.RECORD));
         extra.put("second_factor_completed", String.valueOf(secondFactor));
         // the flow is the customer's: what the person experienced is what the flow did, whatever the platform mode
         extra.put("outcome", DecisionReport.outcomeOf(enforced));
@@ -91,7 +90,7 @@ public final class HumifortisDecisionReport implements Authenticator {
             logger.debugf("[HumifortisDecisionReport] no flow id: %s", e.getMessage());
         }
         String mode = notes.get(ContextNotes.REPORT_MODE);
-        EventQueue.shared(config).submit(DecisionReport.build(DecisionReport.DECISION_ENFORCED,
+        EventQueue.shared(config).submit(DecisionReport.build(DecisionReport.DECISION_ENFORCED, notes.get(ContextNotes.RECORD),
                 HumifortisRiskEvaluator.buildEntityId(realm, user), DecisionReport.USER, flowId, realm.getName(),
                 requested, enforced, mode != null ? mode : "enforce", extra));
     }

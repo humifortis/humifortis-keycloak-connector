@@ -37,6 +37,8 @@ public final class TokenSource {
     private final LongSupplier clock;
 
     private String token;
+    /** The token replaced by the last {@link #renew}: a thread refused with it gets the new one, not a second renewal. */
+    private String previous;
     private long expiresAtMs;
     private long notBeforeMs;
 
@@ -88,6 +90,33 @@ public final class TokenSource {
         notBeforeMs = now + (refused ? RETRY_AFTER_REFUSED_MS : RETRY_AFTER_TRANSIENT_MS);
         if (refused) logger.warnf("[Humifortis] the token endpoint answered %d: authenticating with the API key", r.status());
         return stillValid(now);
+    }
+
+    /**
+     * The token to use after the API refused {@code refused} (401) before it ended: its signing key was retired, or the server no
+     * longer accepts it. The refused token is dropped and a new one is fetched at once, once for all the threads refused together
+     * (a caller that comes after the renewal gets the new token). Null when no token can be had: the caller keeps the API's answer.
+     */
+    public synchronized String renew(String refused) {
+        if (refused == null) return null;
+        if (refused.equals(token)) {
+            previous = token;
+            token = null;
+            expiresAtMs = 0;
+            notBeforeMs = 0;
+        } else if (!refused.equals(previous)) {
+            return null; // not a token of this source
+        }
+        return bearer();
+    }
+
+    /** {@link #renew} on the shared source that issued {@code refused}; null when none did. */
+    static String renewShared(String refused) {
+        for (TokenSource s : SHARED.values()) {
+            String renewed = s.renew(refused);
+            if (renewed != null) return renewed;
+        }
+        return null;
     }
 
     /** The cached token while it has not ended, even past its refresh time: better than falling back when a refresh failed. */

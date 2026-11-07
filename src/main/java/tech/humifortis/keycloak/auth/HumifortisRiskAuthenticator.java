@@ -59,6 +59,7 @@ public class HumifortisRiskAuthenticator implements Authenticator {
 
     // Auth session note keys — shared with HumifortisHighCondition and HumifortisEventListener
     public static final String NOTE_RISK_ACTION  = "HUMIFORTIS_RISK_ACTION";
+    public static final String NOTE_RECORD_ID    = "HUMIFORTIS_RECORD_ID";
     public static final String NOTE_RISK_LEVEL   = "HUMIFORTIS_RISK_LEVEL";
     /** The factor Humifortis decided a step-up asks for (empty when it gave none: the router then picks by its own order). */
     public static final String NOTE_REQUIRED_FACTOR = "HUMIFORTIS_REQUIRED_FACTOR";
@@ -154,6 +155,10 @@ public class HumifortisRiskAuthenticator implements Authenticator {
         // Step 3 — store in auth session for downstream conditions
         context.getAuthenticationSession().setAuthNote(NOTE_RISK_LEVEL,  riskLevel);
         context.getAuthenticationSession().setAuthNote(NOTE_RISK_ACTION, applied);
+        // the decision's record id, for a report sent later in the flow (a skipped step-up)
+        if (serverDecision != null && notBlank(serverDecision.record_id)) {
+            context.getAuthenticationSession().setAuthNote(NOTE_RECORD_ID, serverDecision.record_id);
+        }
         // the session this sign-in creates is issued in the epoch of the person's risk (P23)
         if (serverDecision != null && serverDecision.risk_epoch > 0) {
             context.getAuthenticationSession().setUserSessionNote(tech.humifortis.keycloak.token.RiskEpoch.NOTE, String.valueOf(serverDecision.risk_epoch));
@@ -250,7 +255,6 @@ public class HumifortisRiskAuthenticator implements Authenticator {
 
         java.util.Map<String, String> local = new java.util.LinkedHashMap<>();
         local.put("decision_source", "local");
-        if (notBlank(c.recordId)) local.put("record_id", c.recordId);
 
         boolean explicitDeny = c.decision.mandatory || "LOCK_ACCOUNT".equals(action);
         if (enforcing && explicitDeny) {
@@ -687,7 +691,8 @@ public class HumifortisRiskAuthenticator implements Authenticator {
                 if (fallback != null) extra.putAll(fallback.report());
             }
             if (more != null) extra.putAll(more);
-            EventQueue.shared(config).submit(DecisionReport.build(type, HumifortisRiskEvaluator.buildEntityId(realm, user), DecisionReport.USER,
+            EventQueue.shared(config).submit(DecisionReport.build(type, d != null ? d.record_id : null,
+                    HumifortisRiskEvaluator.buildEntityId(realm, user), DecisionReport.USER,
                     flowId, realm.getName(), action, enforced, mode, extra));
         } catch (RuntimeException e) {
             logger.debugf("[HumifortisRiskAuthenticator] decision report failed: %s", e.getMessage());

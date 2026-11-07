@@ -729,6 +729,8 @@ public class HumifortisRiskEvaluator {
     }
 
     public static class EvaluateResponse {
+        /** The decision's record: its event id in Humifortis. Echoed in the decision report so the report is shown with its decision. */
+        @SerializedName("record_id")            public String       record_id;
         public String       entity_id;
         public double       risk_score;
         public String       risk_level;

@@ -33,6 +33,9 @@ public final class DecisionReport {
     public static final String STEP_UP = "step_up";
     public static final String DENY = "deny";
 
+    /** The metadata key of the decision's record id. */
+    public static final String RECORD_ID = "record_id";
+
     private DecisionReport() {}
 
     /** The outcome of an action as the flow executes it (an unknown action is executed as an allow). */
@@ -65,8 +68,12 @@ public final class DecisionReport {
      * @param enforcedAction   the action the flow applies after the factor fallback chain
      * @param extra            additional context (decision rule, fallback reason...), blank values are dropped
      */
-    public static HumifortisEvent build(String type, String entityId, String entityType, String flowId, String realm,
-                                        String requestedAction, String enforcedAction, String mode,
+    /**
+     * A decision report. {@code recordId} is the decision's record id returned by /evaluate: Humifortis shows the report
+     * with that decision by it. It is null only when Humifortis did not decide (a fallback report).
+     */
+    public static HumifortisEvent build(String type, String recordId, String entityId, String entityType, String flowId,
+                                        String realm, String requestedAction, String enforcedAction, String mode,
                                         Map<String, String> extra) {
         HumifortisEvent e = new HumifortisEvent();
         e.setEventId(UUID.randomUUID().toString());
@@ -87,9 +94,11 @@ public final class DecisionReport {
         e.addMetadata("outcome", applied ? wouldOutcome : ALLOW);
         e.addMetadata("would_outcome", wouldOutcome);
         if (StepUpActions.isStepUp(enforced)) e.addMetadata("step_up_action", enforced);
+        if (recordId != null && !recordId.isBlank()) e.addMetadata(RECORD_ID, recordId);
         if (extra != null) {
             extra.forEach((k, v) -> {
-                if (v != null && !v.isBlank()) e.addMetadata(k, v);
+                // the record id has one source, the argument
+                if (v != null && !v.isBlank() && !RECORD_ID.equals(k)) e.addMetadata(k, v);
             });
         }
         return e;
